@@ -10,7 +10,7 @@ import { useT } from '@/i18n';
 
 /** 后端部署状态 -> 列表页任务状态；starting 也算运行中（正在拉起） */
 function toTaskItem(t: DeployTaskInfo): TaskItem {
-  const status = t.status === 'failed' ? 'FAILED' : t.status === 'stopped' ? 'DONE' : 'RUNNING';
+  const status = t.status === 'failed' ? 'FAILED' : t.status === 'stopped' ? 'STOPPED' : 'RUNNING';
   return {
     id: t.id,
     type: 'deploy',

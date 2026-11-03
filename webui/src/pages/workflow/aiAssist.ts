@@ -9,8 +9,9 @@ import type { TFn } from './nodeTypes';
 /**
  * 编排页的 AI 协助层。
  *
- * 这里放两样东西：AI 能提出的动作类型，和一个假 AI。
- * UI 组件只认 FlowMessage，接真后端时把 askAi() 换成一次请求即可，界面不用动。
+ * 这里放两样东西：AI 能提出的动作类型，和离线剧本（无可用模型时的
+ * 关键词匹配兜底，消息带 offline 标记）。真后端走 streamAiReply（逐个
+ * 尝试已登记模型），makeAiSend 负责在两者间回落。
  *
  * 最重要的一条设计：AI 不直接改图。
  * 它只能"提议"——每条提议是一张动作卡片，得点了应用才会落到图上。
@@ -60,6 +61,8 @@ function reply(text: string, actions?: AiAction[]): FlowMessage {
     text,
     actions,
     states: actions?.map(() => 'pending' as ActionState),
+    /* 剧本产出：面板据此给这条消息标「本地示意」，与 LLM 回复区分 */
+    offline: true,
   };
 }
 

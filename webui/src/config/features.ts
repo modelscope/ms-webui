@@ -12,8 +12,6 @@ export interface FeatureFlags {
   modules: ModuleKey[];
   /** 对话页开启多模型并排对比 */
   chatCompare: boolean;
-  /** 训练页显示「连 twinkle-server」这一类远端任务的暂停/继续 */
-  pauseResume: boolean;
   /** 编排页显示 yaml/代码 双向同步面板 */
   workflowCodeSync: boolean;
 }
@@ -21,6 +19,5 @@ export interface FeatureFlags {
 export const features: FeatureFlags = {
   modules: ['chat', 'train', 'eval', 'export', 'deploy', 'workflow', 'research', 'scripts', 'plugins', 'models'],
   chatCompare: true,
-  pauseResume: true,
   workflowCodeSync: true,
 };

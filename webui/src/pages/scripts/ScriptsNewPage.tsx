@@ -164,6 +164,7 @@ export function ScriptsNewPage() {
       desc={t('sc.desc')}
       preview={preview}
       fields={fields}
+      onSubmit={() => void submit()}
       actions={
         <Button onClick={() => void submit()} disabled={submitting}>
           <Play /> {submitting ? t('tn.launching') : t('sc.launchBtn')}

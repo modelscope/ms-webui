@@ -1,8 +1,7 @@
 import type { ReactNode } from 'react';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Bot, CirclePlay, Info, Save, TriangleAlert } from 'lucide-react';
-import { toast } from 'sonner';
+import { ArrowLeft, Bot, Info, TriangleAlert } from 'lucide-react';
 import { Hint } from './Hint';
 import { PageHeader } from './PageHeader';
 import { Panel } from './TaskDetailShell';
@@ -46,8 +45,8 @@ export function ConfigFormShell({
   sections: Array<{ title: string; extra?: ReactNode; content: ReactNode }>;
   preview: string;
   warning?: string;
-  /** 接了后端的页面传真实提交按钮；不传保持示意按钮 */
-  actions?: ReactNode;
+  /** 页面自己的提交区（提交按钮 + 校验态）；每个新建页都有真实提交动作 */
+  actions: ReactNode;
   /**
    * 交给 AI 助手的字段。每个字段自带 setter，所以这里不用再接一个 onApply。
    * 必填（可以为空数组）：新增一个新建页时得明确表态它的字段给不给 AI 看，
@@ -111,16 +110,7 @@ export function ConfigFormShell({
                 </Button>
               </Hint>
             )}
-            {actions ?? (
-              <>
-                <Button variant="secondary" onClick={() => toast.success(t('shell.savedDemo'))}>
-                  <Save /> {t('shell.saveDraft')}
-                </Button>
-                <Button onClick={() => toast.success(t('shell.submittedDemo'))}>
-                  <CirclePlay /> {t('shell.submitRun')}
-                </Button>
-              </>
-            )}
+            {actions}
           </>
         }
       />

@@ -5,11 +5,9 @@ import {
   ChevronLeft,
   Check,
   MoreHorizontal,
-  Pause,
   Play,
   RotateCw,
   Square,
-  Trash2,
   TriangleAlert,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -21,7 +19,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { PageHeader } from './PageHeader';
@@ -32,7 +29,6 @@ import { CopyText } from './CopyText';
 import { CodeBlock } from './CodeBlock';
 import { RenameDialog, type RenameTarget } from './RenameDialog';
 import type { ModuleMeta } from '@/theme/modules';
-import { features } from '@/config/features';
 import type { TaskItem } from '@/mock/types';
 
 export interface DetailTab {
@@ -196,11 +192,11 @@ export function TaskDetailShell({
   extraMeta?: ReactNode;
   /** 模块特有的操作按钮，放在通用操作左侧 */
   actions?: ReactNode;
-  /** 手动刷新回调（立即拉一帧）；不传则刷新按钮仍是示意态 */
+  /** 手动刷新回调（立即拉一帧）；不传则不渲染刷新按钮 */
   onRefresh?: () => Promise<void>;
-  /** 重命名当前任务的回调；不传则菜单项仍是示意态 */
+  /** 重命名当前任务的回调；不传则不渲染重命名菜单项 */
   onRename?: (id: string, name: string) => Promise<void>;
-  /** 停止当前任务的回调；不传则内置停止按钮仍是示意态 */
+  /** 停止当前任务的回调；不传则不渲染停止按钮 */
   onStop?: (id: string) => Promise<void>;
   /** 停止按钮的说明文案；不传用默认的「SIGTERM 优雅关停」（模块间停止语义不同，如研究页只断关联不杀进程） */
   stopTooltip?: string;
@@ -229,7 +225,6 @@ export function TaskDetailShell({
     );
   }
 
-  const canPause = features.pauseResume && task.type === 'train' && Boolean(task.serverUrl);
   const current = tabs.find((t) => t.key === activeTab) ?? tabs[0];
 
   return (
@@ -254,32 +249,16 @@ export function TaskDetailShell({
             {onAssistant && (
               <ActionButton icon={<Bot />} tooltip={t('task.aiAssistant')} onClick={onAssistant} />
             )}
-            <ActionButton
-              icon={<RotateCw />}
-              tooltip={t('task.refresh')}
-              onClick={() => {
-                if (onRefresh) {
+            {onRefresh && (
+              <ActionButton
+                icon={<RotateCw />}
+                tooltip={t('task.refresh')}
+                onClick={() => {
                   void onRefresh()
                     .then(() => toast.success(t('task.refreshed')))
                     .catch((e) => toast.error(String(e)));
-                } else {
-                  toast.success(t('task.refreshedDemo'));
-                }
-              }}
-            />
-            {task.status === 'RUNNING' && canPause && (
-              <ActionButton
-                icon={<Pause />}
-                tooltip={t('task.pauseHint')}
-                onClick={() => toast.info(t('task.pauseDemo'))}
-              >
-                {t('task.pause')}
-              </ActionButton>
-            )}
-            {task.status === 'PAUSED' && (
-              <ActionButton tone="primary" icon={<Play />} onClick={() => toast.info(t('task.resumeDemo'))}>
-                {t('task.resume')}
-              </ActionButton>
+                }}
+              />
             )}
             {/* 从断点续跑：页面判断可续（失败/被停且有 checkpoint）才传 onResume */}
             {onResume && id && task.status !== 'RUNNING' && (
@@ -294,18 +273,14 @@ export function TaskDetailShell({
                 {t('task.resumeFrom')}
               </ActionButton>
             )}
-            {task.status === 'RUNNING' && (
+            {task.status === 'RUNNING' && onStop && id && (
               <ActionButton
                 tone="danger"
                 icon={<Square />}
-                tooltip={onStop ? stopTooltip ?? t('task.sigtermHint') : undefined}
-                onClick={
-                  onStop && id
-                    ? () => {
-                        void onStop(id).catch((e) => toast.error(String(e)));
-                      }
-                    : () => toast.info(t('task.stopDemo'))
-                }
+                tooltip={stopTooltip ?? t('task.sigtermHint')}
+                onClick={() => {
+                  void onStop(id).catch((e) => toast.error(String(e)));
+                }}
               >
                 {t('task.stop')}
               </ActionButton>
@@ -315,28 +290,19 @@ export function TaskDetailShell({
                 <ActionButton icon={<MoreHorizontal />} />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onClick={() =>
-                    onRename && id
-                      ? setRenaming({ id, label: task.label })
-                      : toast.info(t('task.renameDemo'))
-                  }
-                >
-                  {t('task.rename')}
-                </DropdownMenuItem>
+                {onRename && id && (
+                  <DropdownMenuItem onClick={() => setRenaming({ id, label: task.label })}>
+                    {t('task.rename')}
+                  </DropdownMenuItem>
+                )}
                 {/*
-                 * 以此为模板新建：带来源 id 跳新建页，由各模块的新建页解析预填。
-                 * 未接后端的模块（train/export）忽略该参数，退化为普通新建。
+                 * 以此为模板新建：带来源 id 跳新建页，五个模块的新建页都解析
+                 * ?from= 预填（train/eval/export/deploy/scripts）。
                  */}
                 <DropdownMenuItem
                   onClick={() => navigate(`${module.path}/new?from=${encodeURIComponent(task.id)}`)}
                 >
                   {t('task.useAsTemplate')}
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" onClick={() => toast.info(t('task.demoBadge'))}>
-                  <Trash2 />
-                  {t('task.delete')}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -345,11 +311,6 @@ export function TaskDetailShell({
       />
 
       <Column wide className="pb-10">
-        {task.status === 'PAUSED' && (
-          <Notice tone="warn" title={t('task.pausedBanner')}>
-            {t('task.pausedDetail')}
-          </Notice>
-        )}
         {task.status === 'FAILED' && task.error && (
           <Notice tone="error" title={t('task.failedBanner')}>
             {task.error}

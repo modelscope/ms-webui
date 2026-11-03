@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { RotateCw } from 'lucide-react';
 import { ActionButton, TaskDetailShell, MetaCell } from '@/components/TaskDetailShell';
 import { LogViewer } from '@/components/LogViewer';
+import { PageAssistant } from '@/components/PageAssistant';
+import { moduleTaskTools } from '@/agent/taskTools';
+import { useSettings } from '@/settings/SettingsContext';
 import { MODULES } from '@/theme/modules';
 import type { TaskItem } from '@/mock/types';
 import { getScriptLog, listScripts, renameScript, startScript, stopScript, type ScriptTaskInfo } from '@/api/scripts';
@@ -11,7 +14,7 @@ import { toast } from 'sonner';
 
 /** 后端脚本状态 -> 详情页任务状态 */
 function toTaskItem(t: ScriptTaskInfo): TaskItem {
-  const status = t.status === 'failed' ? 'FAILED' : t.status === 'done' || t.status === 'stopped' ? 'DONE' : 'RUNNING';
+  const status = t.status === 'failed' ? 'FAILED' : t.status === 'done' ? 'DONE' : t.status === 'stopped' ? 'STOPPED' : 'RUNNING';
   return {
     id: t.id,
     type: 'scripts',
@@ -40,6 +43,10 @@ export function ScriptsDetailPage() {
   /* 原始任务表：重跑要拿 script/args */
   const [raw, setRaw] = useState<ScriptTaskInfo[]>([]);
   const [log, setLog] = useState<string[]>([]);
+  /* 页面 AI 助手：任务管理工具（列出/停止/重命名），入口在页头 Bot 按钮 */
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const { settings } = useSettings();
+  const assistantTools = useMemo(() => moduleTaskTools('script'), []);
 
   const refresh = useCallback(async () => {
     try {
@@ -80,46 +87,56 @@ export function ScriptsDetailPage() {
   const current = raw.find((x) => x.id === id);
 
   return (
-    <TaskDetailShell
-      module={MODULES.scripts}
-      tasks={tasks}
-      tabs={tabs}
-      activeTab="log"
-      /* 重跑：同 script/args 新任务，跳到它的日志页 */
-      actions={
-        current ? (
-          <ActionButton
-            icon={<RotateCw />}
-            tooltip={t('sc.rerunTip')}
-            onClick={() => {
-              void startScript(current.script, current.args.length ? current.args : undefined)
-                .then((newId) => navigate(`/scripts/${newId}/log`))
-                .catch((e) => toast.error(String(e)));
-            }}
-          >
-            {t('sc.rerun')}
-          </ActionButton>
-        ) : undefined
-      }
-      extraMeta={<MetaCell label={t('sc.workspace')} value="~/.swift/workspace" />}
-      onRefresh={refresh}
-      onRename={
-        id
-          ? async (_id, name) => {
-              await renameScript(_id, name);
-              await refresh();
-            }
-          : undefined
-      }
-      onStop={
-        id
-          ? async () => {
-              await stopScript(id);
-              await new Promise((r) => setTimeout(r, 1000));
-              await refresh();
-            }
-          : undefined
-      }
-    />
+    <>
+      <TaskDetailShell
+        module={MODULES.scripts}
+        tasks={tasks}
+        tabs={tabs}
+        activeTab="log"
+        onAssistant={() => setAssistantOpen(true)}
+        /* 重跑：同 script/args 新任务，跳到它的日志页 */
+        actions={
+          current ? (
+            <ActionButton
+              icon={<RotateCw />}
+              tooltip={t('sc.rerunTip')}
+              onClick={() => {
+                void startScript(current.script, current.args.length ? current.args : undefined)
+                  .then((newId) => navigate(`/scripts/${newId}/log`))
+                  .catch((e) => toast.error(String(e)));
+              }}
+            >
+              {t('sc.rerun')}
+            </ActionButton>
+          ) : undefined
+        }
+        extraMeta={<MetaCell label={t('sc.workspace')} value="~/.swift/workspace" />}
+        onRefresh={refresh}
+        onRename={
+          id
+            ? async (_id, name) => {
+                await renameScript(_id, name);
+                await refresh();
+              }
+            : undefined
+        }
+        onStop={
+          id
+            ? async () => {
+                await stopScript(id);
+                await new Promise((r) => setTimeout(r, 1000));
+                await refresh();
+              }
+            : undefined
+        }
+      />
+      <PageAssistant
+        open={assistantOpen}
+        onClose={() => setAssistantOpen(false)}
+        module={MODULES.scripts.key}
+        tools={assistantTools}
+        confirmBeforeApply={settings.aiConfirmBeforeApply}
+      />
+    </>
   );
 }

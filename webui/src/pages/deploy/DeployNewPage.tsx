@@ -209,6 +209,7 @@ export function DeployNewPage() {
       desc={t('dp.desc')}
       preview={preview}
       fields={fields}
+      onSubmit={() => void submit()}
       extraArgs={extraArgs}
       onExtraArgsChange={setExtraArgs}
       actions={

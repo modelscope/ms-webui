@@ -19,7 +19,10 @@ import { useT } from '@/i18n';
 
 /** 后端训练状态 -> 详情页任务状态 */
 function toTaskItem(t: TrainTaskInfo): TaskItem {
-  const status = t.status === 'failed' ? 'FAILED' : t.status === 'running' ? 'RUNNING' : 'DONE';
+  const status = t.status === 'failed' ? 'FAILED' : t.status === 'running' ? 'RUNNING' : t.status === 'stopped' ? 'STOPPED' : 'DONE';
+  /* 远端形态（mode=remote）显示 server 地址：如实展示这轮训练跑在哪 */
+  const serverUrl =
+    t.params.mode === 'remote' && t.params.server_base_url ? String(t.params.server_base_url) : undefined;
   return {
     id: t.id,
     type: 'train',
@@ -28,6 +31,7 @@ function toTaskItem(t: TrainTaskInfo): TaskItem {
     createdAt: t.startedAt,
     runner: 'local',
     model: t.model,
+    ...(serverUrl ? { serverUrl } : {}),
     /*
      * 创建命令：args 是后端创建时拼好的完整 spawn 参数（spawn 与展示同源），
      * CLI 形态把首个 -m swift.dev.cli.<taskType> 换成用户可读的命令形态展示；

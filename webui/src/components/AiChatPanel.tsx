@@ -33,6 +33,12 @@ export interface AiMessage<A> {
   states?: ActionState[];
   /** 生成中的占位 */
   pending?: boolean;
+  /**
+   * 离线剧本产出（无可用模型时的关键词匹配回复）。挂在消息级而不是
+   * footer 级：同一次会话里 LLM 与剧本可以混排（模型中途被删/失联回落），
+   * 每条消息各自标各自的事实。
+   */
+  offline?: boolean;
 }
 
 /** 一条提议在卡片上长什么样。翻译权在提议方，面板不认识动作的内部结构 */
@@ -90,7 +96,10 @@ export function AiChatPanel<A>({
   /** 头像颜色。节点面板里传节点主色，认得出这段对话是在问谁 */
   accent?: string;
   placeholder?: string;
-  /** 输入框下的说明行。接了真模型的使用方改写成自己的实情 */
+  /**
+   * 输入框下的说明行。不传不渲染：真模型与离线剧本的区分已下沉到消息级
+   * offline 标记，footer 不再承担「这套回答是不是本地示意」的判断。
+   */
   footerNote?: string;
 }) {
   const tail = useRef<HTMLDivElement>(null);
@@ -126,6 +135,11 @@ export function AiChatPanel<A>({
                 )}
               >
                 {m.pending ? <span className="text-muted-foreground">{t('chatPanel.thinking')}</span> : m.text}
+                {m.offline && (
+                  <span className="text-muted-foreground mt-1.5 block border-t border-dashed pt-1 text-[11px]">
+                    {t('chatPanel.demoHint')}
+                  </span>
+                )}
               </div>
             </div>
 
@@ -212,7 +226,7 @@ export function AiChatPanel<A>({
             </Button>
           )}
         </div>
-        <div className="text-muted-foreground mt-1.5 text-[11px]">{footerNote ?? t('chatPanel.demoHint')}</div>
+        {footerNote && <div className="text-muted-foreground mt-1.5 text-[11px]">{footerNote}</div>}
       </div>
     </div>
   );

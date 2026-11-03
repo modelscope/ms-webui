@@ -277,6 +277,7 @@ export function EvalNewPage() {
       desc={t('ev.desc')}
       preview={preview}
       fields={fields}
+      onSubmit={() => void submit()}
       extraArgs={extraArgs}
       onExtraArgsChange={setExtraArgs}
       warning={t('ev.warn')}

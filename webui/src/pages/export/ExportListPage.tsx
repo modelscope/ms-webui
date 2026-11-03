@@ -22,7 +22,7 @@ function opSummary(task: ExportTaskInfo, t: TFn): string {
 
 /** 后端导出状态 -> 列表页任务状态 */
 function toTaskItem(task: ExportTaskInfo, t: TFn): TaskItem {
-  const status = task.status === 'failed' ? 'FAILED' : task.status === 'running' ? 'RUNNING' : 'DONE';
+  const status = task.status === 'failed' ? 'FAILED' : task.status === 'running' ? 'RUNNING' : task.status === 'stopped' ? 'STOPPED' : 'DONE';
   return {
     id: task.id,
     type: 'export',

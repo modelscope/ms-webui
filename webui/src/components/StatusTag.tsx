@@ -3,7 +3,7 @@ import type { TaskStatus } from '@/mock/types';
 import { useT, type MessageKey } from '@/i18n';
 
 /**
- * 状态标签。状态集合与设计文档一致：RUNNING / DONE / FAILED / PAUSED，没有第五种。
+ * 状态标签。状态集合与任务执行器一致：RUNNING / DONE / FAILED / STOPPED。
  *
  * 原来是无边框的软胶囊（圆角 999 + 浅底色），现在是细边框 + 极淡底色的标记。
  * 圆角走 rounded-sm 而不是不写：以前靠「不写圆角类」就能得到直角，那是因为当时
@@ -14,7 +14,7 @@ import { useT, type MessageKey } from '@/i18n';
  * 好处是画布里的节点边框、连线动画和这里天然同色——状态色只有一处定义。
  * 底色和边框由同一个变量 color-mix 出来，深色模式下会跟着一起变，不用写两套。
  *
- * tooltip 写清每种状态的判定来源，避免用户把 PAUSED 当成已结束。
+ * tooltip 写清每种状态的判定来源，避免用户把 STOPPED 当成 DONE。
  */
 const STATUS_META: Record<TaskStatus, { text: MessageKey; token: string; live?: boolean; hint: MessageKey }> =
   {
@@ -34,10 +34,10 @@ const STATUS_META: Record<TaskStatus, { text: MessageKey; token: string; live?: 
       token: '--state-failed',
       hint: 'status.failedHint',
     },
-    PAUSED: {
-      text: 'status.paused',
+    STOPPED: {
+      text: 'status.stopped',
       token: '--state-paused',
-      hint: 'status.pausedHint',
+      hint: 'status.stoppedHint',
     },
   };
 

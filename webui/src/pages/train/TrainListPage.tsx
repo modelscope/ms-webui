@@ -10,7 +10,10 @@ import { useT } from '@/i18n';
 
 /** 后端训练状态 -> 列表页任务状态 */
 function toTaskItem(t: TrainTaskInfo): TaskItem {
-  const status = t.status === 'failed' ? 'FAILED' : t.status === 'running' ? 'RUNNING' : 'DONE';
+  const status = t.status === 'failed' ? 'FAILED' : t.status === 'running' ? 'RUNNING' : t.status === 'stopped' ? 'STOPPED' : 'DONE';
+  /* 远端形态（mode=remote）显示 server 地址：如实展示这轮训练跑在哪 */
+  const serverUrl =
+    t.params.mode === 'remote' && t.params.server_base_url ? String(t.params.server_base_url) : undefined;
   return {
     id: t.id,
     type: 'train',
@@ -19,6 +22,7 @@ function toTaskItem(t: TrainTaskInfo): TaskItem {
     createdAt: t.startedAt,
     runner: 'local',
     model: t.model,
+    ...(serverUrl ? { serverUrl } : {}),
     /* 进度来自日志解析的 tqdm 帧；没有时 totalSteps 为空、列表只显示状态 */
     ...(t.step !== undefined && t.totalSteps ? { step: t.step, totalSteps: t.totalSteps } : {}),
   };

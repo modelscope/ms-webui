@@ -8,13 +8,13 @@ import { PageAssistant } from '@/components/PageAssistant';
 import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
 import type { TaskItem } from '@/mock/types';
-import { getEvalLog, listEvals, renameEval, type EvalReportRow, type EvalTaskInfo } from '@/api/eval';
+import { getEvalLog, listEvals, renameEval, stopEval, type EvalReportRow, type EvalTaskInfo } from '@/api/eval';
 import { useT, type MessageKey } from '@/i18n';
 
 /** 后端评测状态 -> 详情页任务状态 */
 function toTaskItem(task: EvalTaskInfo, t: (key: MessageKey, vars?: Record<string, string | number>) => string): TaskItem {
   const status =
-    task.status === 'failed' ? 'FAILED' : task.status === 'done' || task.status === 'stopped' ? 'DONE' : 'RUNNING';
+    task.status === 'failed' ? 'FAILED' : task.status === 'done' ? 'DONE' : task.status === 'stopped' ? 'STOPPED' : 'RUNNING';
   return {
     id: task.id,
     type: 'eval',
@@ -165,6 +165,14 @@ export function EvalDetailPage({ tab }: { tab: 'result' | 'log' }) {
           id
             ? async (_id, name) => {
                 await renameEval(_id, name);
+                await refresh();
+              }
+            : undefined
+        }
+        onStop={
+          id
+            ? async (stopId) => {
+                await stopEval(stopId);
                 await refresh();
               }
             : undefined

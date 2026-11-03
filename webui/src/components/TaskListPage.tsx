@@ -10,15 +10,12 @@ import {
   MoreHorizontal,
   Network,
   Package,
-  Pause,
   Bot,
-  Play,
   Plus,
   RotateCw,
   Rocket,
   Search,
   Square,
-  Trash2,
   Workflow,
   Zap,
 } from 'lucide-react';
@@ -30,7 +27,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
@@ -52,7 +48,6 @@ import { Column } from './Column';
 import { RenameDialog, type RenameTarget } from './RenameDialog';
 import type { ModuleKey, ModuleMeta } from '@/theme/modules';
 import { taskDetailPath } from '@/theme/modules';
-import { features } from '@/config/features';
 import type { TaskItem, TaskStatus } from '@/mock/types';
 
 /** 列表页可选列，各模块按需开启，避免为每个模块复制一份列表页 */
@@ -69,11 +64,11 @@ export interface TaskListOptions {
   createText?: string;
   /** 「模型 / 来源」的语义标签，各模块不同 */
   sourceLabel: string;
-  /** 接了后端的模块传刷新回调（手动立即拉一帧）；不传则保持示意 toast */
+  /** 刷新回调（手动立即拉一帧）；不传则不渲染刷新按钮 */
   onRefresh?: () => Promise<void>;
-  /** 接了后端的模块传重命名回调；不传则菜单项保持示意 toast */
+  /** 重命名回调；不传则不渲染重命名菜单项 */
   onRename?: (id: string, name: string) => Promise<void>;
-  /** 接了后端的模块传停止回调；不传则保持示意 toast */
+  /** 停止回调；不传则不渲染停止按钮（含确认弹窗） */
   onStop?: (id: string) => Promise<void>;
   /** 重跑回调（同参数再执行一次，如脚本任务）；不传不显示重跑按钮 */
   onRerun?: (id: string) => Promise<void>;
@@ -86,7 +81,7 @@ const STATUS_FILTERS: Array<{ label: MessageKey; value: TaskStatus | 'ALL' }> = 
   { label: 'task.running', value: 'RUNNING' },
   { label: 'task.done', value: 'DONE' },
   { label: 'task.failed', value: 'FAILED' },
-  { label: 'task.paused', value: 'PAUSED' },
+  { label: 'task.stopped', value: 'STOPPED' },
 ];
 
 const MODULE_ICON: Partial<Record<ModuleKey, ReactNode>> = {
@@ -172,9 +167,6 @@ export function TaskListPage({
     [tasks, keyword, status],
   );
 
-  /** 只有连了 twinkle-server 的训练才能暂停/继续，本地训练杀了状态就没了 */
-  const canPause = (t: TaskItem) => features.pauseResume && t.type === 'train' && Boolean(t.serverUrl);
-
   const stop = (e: React.MouseEvent) => e.stopPropagation();
 
   return (
@@ -201,29 +193,27 @@ export function TaskListPage({
                 <TooltipContent>{tr('task.aiAssistant')}</TooltipContent>
               </Tooltip>
             )}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={tr('task.refresh')}
-                  className="text-muted-foreground"
-                  onClick={() => {
-                    if (options.onRefresh) {
+            {options.onRefresh && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={tr('task.refresh')}
+                    className="text-muted-foreground"
+                    onClick={() => {
                       void options
-                        .onRefresh()
+                        .onRefresh!()
                         .then(() => toast.success(tr('task.refreshed')))
                         .catch((e) => toast.error(String(e)));
-                    } else {
-                      toast.success(tr('task.refreshedDemo'));
-                    }
-                  }}
-                >
-                  <RotateCw />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{tr('task.refresh')}</TooltipContent>
-            </Tooltip>
+                    }}
+                  >
+                    <RotateCw />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{tr('task.refresh')}</TooltipContent>
+              </Tooltip>
+            )}
             {options.showCompare && compareIds.length >= 2 && (
               <Button
                 variant="outline"
@@ -402,21 +392,7 @@ export function TaskListPage({
                       }}
                     />
                   )}
-                  {t.status === 'RUNNING' && canPause(t) && (
-                    <RowAction
-                      icon={<Pause />}
-                      label={tr('task.pauseHint')}
-                      onClick={() => toast.info(tr('task.pauseDemo'))}
-                    />
-                  )}
-                  {t.status === 'PAUSED' && (
-                    <RowAction
-                      icon={<Play />}
-                      label={tr('task.resumeHint')}
-                      onClick={() => toast.info(tr('task.resumeDemo'))}
-                    />
-                  )}
-                  {t.status === 'RUNNING' && (
+                  {t.status === 'RUNNING' && options.onStop && (
                     /* 停止是不可逆的，换成需要二次确认的弹窗；
                        antd 的 Popconfirm 在 shadcn 里对应 AlertDialog */
                     <AlertDialog>
@@ -442,14 +418,10 @@ export function TaskListPage({
                           <AlertDialogCancel>{tr('common.cancel')}</AlertDialogCancel>
                           <AlertDialogAction
                             onClick={() => {
-                              if (options.onStop) {
-                                void options
-                                  .onStop(t.id)
-                                  .then(() => stopToast(t.label))
-                                  .catch((e) => toast.error(String(e)));
-                              } else {
-                                toast.info(tr('task.stopDemo'));
-                              }
+                              void options
+                                .onStop!(t.id)
+                                .then(() => stopToast(t.label))
+                                .catch((e) => toast.error(String(e)));
                             }}
                           >
                             {tr('task.stop')}
@@ -470,31 +442,19 @@ export function TaskListPage({
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                      <DropdownMenuItem
-                        onClick={() =>
-                          options.onRename
-                            ? setRenaming({ id: t.id, label: t.label })
-                            : toast.info(tr('task.renameDemo'))
-                        }
-                      >
-                        {tr('task.rename')}
-                      </DropdownMenuItem>
+                      {options.onRename && (
+                        <DropdownMenuItem onClick={() => setRenaming({ id: t.id, label: t.label })}>
+                          {tr('task.rename')}
+                        </DropdownMenuItem>
+                      )}
                       {/*
-                       * 以此为模板新建：带来源 id 跳新建页，由各模块的新建页解析预填。
-                       * 未接后端的模块（train/export）忽略该参数，退化为普通新建。
+                       * 以此为模板新建：带来源 id 跳新建页，五个模块的新建页都解析
+                       * ?from= 预填（train/eval/export/deploy/scripts）。
                        */}
                       <DropdownMenuItem
                         onClick={() => navigate(`${module.path}/new?from=${encodeURIComponent(t.id)}`)}
                       >
                         {tr('task.useAsTemplate')}
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onClick={() => toast.info(tr('task.demoBadge'))}
-                      >
-                        <Trash2 />
-                        {tr('task.delete')}
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>

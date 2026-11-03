@@ -5,7 +5,7 @@
  */
 
 /** 任务状态。由后端从 exit_code + 查活推导，前端只负责显示，不自己算 */
-export type TaskStatus = 'RUNNING' | 'DONE' | 'FAILED' | 'PAUSED';
+export type TaskStatus = 'RUNNING' | 'DONE' | 'FAILED' | 'STOPPED';
 
 export type TaskType = 'train' | 'eval' | 'export' | 'deploy' | 'workflow' | 'research' | 'scripts';
 
@@ -21,7 +21,7 @@ export interface TaskItem {
   status: TaskStatus;
   createdAt: string;
   runner: RunnerKind;
-  /** 连了 twinkle-server 的任务：显示服务端地址，且可暂停/继续 */
+  /** 远端形态任务（mode=remote）的 server 地址：列表/详情如实展示跑在哪 */
   serverUrl?: string;
   model: string;
   /** 训练进度，仅 train */

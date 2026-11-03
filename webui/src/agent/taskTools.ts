@@ -3,7 +3,8 @@ import type { PrefillModule, PrefillPayload } from '@/store/prefill';
 import { getTrainLog, listTrains, renameTrain, startTrain, stopTrain, trainTaskLabel } from '@/api/train';
 import { getEvalLog, listEvals, renameEval, stopEval } from '@/api/eval';
 import { getExportLog, listExports, renameExport, stopExport } from '@/api/export';
-import { getDeployLog, listDeploys, renameDeploy, stopDeploy } from '@/api/deploy';
+import { listDeploys, getDeployLog, renameDeploy, stopDeploy } from '@/api/deploy';
+import { listScripts, renameScript, stopScript } from '@/api/scripts';
 
 /**
  * 首页（对话页）的任务工具集：创建四类任务、批量启动消融实验、列出现有任务、停止任务。
@@ -562,12 +563,13 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
  * 任务表里是同一操作（DELETE = SIGTERM 终止进程；已完成任务无进程可杀，
  * 调了也只是标记 stopped），两个名字都注册、description 里把语义讲清。
  */
-export function moduleTaskTools(module: 'train' | 'eval' | 'export' | 'deploy'): AgentTool[] {
+export function moduleTaskTools(module: 'train' | 'eval' | 'export' | 'deploy' | 'script'): AgentTool[] {
   const labels: Record<typeof module, string> = {
     train: '训练',
     eval: '评测',
     export: '导出',
     deploy: '部署',
+    script: '脚本',
   };
   const label = labels[module];
 
@@ -595,7 +597,9 @@ export function moduleTaskTools(module: 'train' | 'eval' | 'export' | 'deploy'):
                 })
               : module === 'export'
                 ? (await listExports()).map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.model}`)
-                : (await listDeploys()).map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.servedName}`);
+                : module === 'deploy'
+                  ? (await listDeploys()).map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.servedName}`)
+                  : (await listScripts()).map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.script}`);
         return lines.length ? `${label}任务 ${lines.length} 个：\n${lines.join('\n')}` : `没有${label}任务。`;
       } catch (e) {
         return `任务列表读取失败: ${String(e)}`;
@@ -632,7 +636,8 @@ export function moduleTaskTools(module: 'train' | 'eval' | 'export' | 'deploy'):
           if (module === 'train') await stopTrain(id);
           else if (module === 'eval') await stopEval(id);
           else if (module === 'export') await stopExport(id);
-          else await stopDeploy(id);
+          else if (module === 'deploy') await stopDeploy(id);
+          else await stopScript(id);
           return `已对 ${label}任务 ${id} 执行停止。`;
         } catch (e) {
           return `操作失败: ${String(e)}`;
@@ -664,7 +669,8 @@ export function moduleTaskTools(module: 'train' | 'eval' | 'export' | 'deploy'):
         if (module === 'train') await renameTrain(id, name);
         else if (module === 'eval') await renameEval(id, name);
         else if (module === 'export') await renameExport(id, name);
-        else await renameDeploy(id, name);
+        else if (module === 'deploy') await renameDeploy(id, name);
+        else await renameScript(id, name);
         return `已把 ${label}任务 ${id} 改名为「${name}」。`;
       } catch (e) {
         return `重命名失败: ${String(e)}`;
