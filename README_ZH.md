@@ -16,6 +16,10 @@
 <a href="https://github.com/modelscope/ms-webui/pulls"><img src="https://img.shields.io/badge/PR-welcome-55EB99.svg"></a>
 </p>
 
+<p align="center">
+        <a href="http://64.177.55.167:5180">在线演示</a> &nbsp（展览模式：远端多 LoRA 训练，无需本地 GPU）&nbsp
+</p>
+
 ## ✨ ms-webui 是什么？
 
 ms-webui 是 [ms-swift](https://github.com/modelscope/ms-swift) 5.x 与

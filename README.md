@@ -16,6 +16,10 @@
 <a href="https://github.com/modelscope/ms-webui/pulls"><img src="https://img.shields.io/badge/PR-welcome-55EB99.svg"></a>
 </p>
 
+<p align="center">
+        <a href="http://64.177.55.167:5180">Live Demo</a> &nbsp（expo mode: remote multi-LoRA training, no local GPU）&nbsp
+</p>
+
 ## ✨ What is ms-webui?
 
 ms-webui is the web interface of [ms-swift](https://github.com/modelscope/ms-swift) 5.x
