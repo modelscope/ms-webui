@@ -51,6 +51,9 @@ export const en: Partial<MessageTable> = {
   'sidebar.searchHint': 'Search ⌘K',
   'sidebar.notifications': 'Notifications',
   'sidebar.msToken': 'MS Token',
+  'sidebar.groupTrain': 'Train',
+  'sidebar.groupDeliver': 'Deliver',
+  'sidebar.groupAssets': 'Assets',
   'sidebar.msTokenOn': 'configured',
   'sidebar.msTokenOff': 'not set',
 

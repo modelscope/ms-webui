@@ -50,6 +50,9 @@ export const zh = {
   'sidebar.searchHint': '搜索 ⌘K',
   'sidebar.notifications': '通知',
   'sidebar.msToken': 'MS Token',
+  'sidebar.groupTrain': '训练',
+  'sidebar.groupDeliver': '交付',
+  'sidebar.groupAssets': '资源',
   'sidebar.msTokenOn': '已配置',
   'sidebar.msTokenOff': '未配置',
 

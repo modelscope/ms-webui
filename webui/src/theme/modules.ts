@@ -87,6 +87,23 @@ export const MODULES: Record<ModuleKey, ModuleMeta> = {
 /** 侧边导航顺序 */
 export const MODULE_ORDER: ModuleKey[] = ['chat', 'train', 'eval', 'export', 'deploy', 'workflow', 'research', 'scripts', 'plugins', 'models'];
 
+/*
+ * 侧边导航的分组排布：对话是主入口单独置顶，其余按工作流语义三组各三项
+ * ——训练（把模型变好的三条路：表单训练 / 自动研究 / 可视化编排）、交付
+ * （验证与上线：评测 / 导出 / 部署）、资源（支撑材料：脚本 / 插件 / 模型）。
+ * 与 MODULE_ORDER 各自独立：顺序表管「有哪些」，分组表管「怎么摆」。
+ */
+export interface NavGroup {
+  label: MessageKey;
+  items: ModuleKey[];
+}
+
+export const NAV_GROUPS: NavGroup[] = [
+  { label: 'sidebar.groupTrain', items: ['train', 'workflow', 'research'] },
+  { label: 'sidebar.groupDeliver', items: ['eval', 'export', 'deploy'] },
+  { label: 'sidebar.groupAssets', items: ['scripts', 'plugins', 'models'] },
+];
+
 /** 根据当前 pathname 反查所属模块，找不到时回落到 chat */
 export function moduleOf(pathname: string): ModuleMeta {
   const hit = MODULE_ORDER.map((k) => MODULES[k]).find(

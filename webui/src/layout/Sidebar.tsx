@@ -1,4 +1,3 @@
-import { useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Boxes,
@@ -30,7 +29,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { ModuleKey } from '@/theme/modules';
-import { MODULES, MODULE_ORDER, moduleOf } from '@/theme/modules';
+import { MODULES, NAV_GROUPS, moduleOf } from '@/theme/modules';
 import { features } from '@/config/features';
 import { useSettings } from '@/settings/SettingsContext';
 import { useRecent } from '@/store/recent';
@@ -131,11 +130,6 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
   const current = moduleOf(pathname);
   const { t, locale, setLocale } = useT();
 
-  const items = useMemo(
-    () => MODULE_ORDER.filter((k) => features.modules.includes(k)).map((k) => MODULES[k]),
-    [],
-  );
-
   /** 「最近」分组：用户真实发生过的操作（新对话、新部署…），见 store/recent.ts */
   const recent = useRecent();
 
@@ -152,6 +146,43 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         : 'text-sidebar-foreground/60 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground',
       extra,
     );
+
+  /** 一个模块的导航行：折叠态包 tooltip（悬停见全名），对话行带 + 按钮 */
+  const renderModule = (m: (typeof MODULES)[ModuleKey]) => {
+    const active = current.key === m.key;
+    const link = (
+      <Link
+        to={m.path}
+        data-tour={m.key}
+        className={row(
+          active,
+          /* 对话行右侧留出脱离行外的 + 按钮位置 */
+          !collapsed && m.key === 'chat' ? 'pe-1' : undefined,
+        )}
+      >
+        <span className="inline-flex text-current opacity-90">{ICONS[m.key]}</span>
+        {!collapsed && t(m.label)}
+        {!collapsed && m.key === 'chat' && (
+          <span className="ms-auto">
+            <ChromeIconButton
+              icon={<Plus size={13} />}
+              label={t('common.newChat')}
+              size={24}
+              onClick={() => navigate('/chat')}
+            />
+          </span>
+        )}
+      </Link>
+    );
+    return collapsed ? (
+      <Tooltip key={m.key}>
+        <TooltipTrigger asChild>{link}</TooltipTrigger>
+        <TooltipContent side="right">{t(m.label)}</TooltipContent>
+      </Tooltip>
+    ) : (
+      <div key={m.key}>{link}</div>
+    );
+  };
 
   return (
     <div
@@ -224,40 +255,24 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 py-0.5">
-        {/* 模块导航 */}
-        {items.map((m) => {
-          const active = current.key === m.key;
-          const link = (
-            <Link
-              to={m.path}
-              data-tour={m.key}
-              className={row(
-                active,
-                /* 对话行右侧留出脱离行外的 + 按钮位置 */
-                !collapsed && m.key === 'chat' ? 'pe-1' : undefined,
-              )}
-            >
-              <span className="inline-flex text-current opacity-90">{ICONS[m.key]}</span>
-              {!collapsed && t(m.label)}
-              {!collapsed && m.key === 'chat' && (
-                <span className="ms-auto">
-                  <ChromeIconButton
-                    icon={<Plus size={13} />}
-                    label={t('common.newChat')}
-                    size={24}
-                    onClick={() => navigate('/chat')}
-                  />
-                </span>
-              )}
-            </Link>
-          );
-          return collapsed ? (
-            <Tooltip key={m.key}>
-              <TooltipTrigger asChild>{link}</TooltipTrigger>
-              <TooltipContent side="right">{t(m.label)}</TooltipContent>
-            </Tooltip>
-          ) : (
-            <div key={m.key}>{link}</div>
+        {/*
+         * 模块导航：对话是主入口单独置顶；其余按工作流三组（训练 / 交付 /
+         * 资源），组标题复用「最近」的低对比小字——视觉上是一套语言。折叠态
+         * 不渲染组标题，纯图标列与分组前完全一致。
+         */}
+        {features.modules.includes('chat') && (
+          <div className="mb-1">{renderModule(MODULES.chat)}</div>
+        )}
+        {NAV_GROUPS.map((group) => {
+          const groupItems = group.items
+            .filter((k) => features.modules.includes(k))
+            .map((k) => MODULES[k]);
+          if (!groupItems.length) return null;
+          return (
+            <div key={group.label}>
+              {!collapsed && <SectionLabel>{t(group.label)}</SectionLabel>}
+              {groupItems.map(renderModule)}
+            </div>
           );
         })}
 
