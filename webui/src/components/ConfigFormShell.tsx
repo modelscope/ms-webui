@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Bot, CirclePlay, Info, Save, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
@@ -7,9 +7,9 @@ import { Hint } from './Hint';
 import { PageHeader } from './PageHeader';
 import { Panel } from './TaskDetailShell';
 import { Button } from './ui/button';
-import { ConfigAssistant } from './ConfigAssistant';
-import type { ConfigField } from './configAssist';
+import { PageAssistant, type ConfigField } from './PageAssistant';
 import { useSettings } from '@/settings/SettingsContext';
+import { useT } from '@/i18n';
 import type { ModuleMeta } from '@/theme/modules';
 
 /**
@@ -31,6 +31,14 @@ export function ConfigFormShell({
   preview,
   warning,
   fields,
+  actions,
+  extraArgs,
+  onExtraArgsChange,
+  assistantAutoOpen,
+  assistantIntro,
+  assistantConv,
+  assistantModel,
+  onSubmit,
 }: {
   module: ModuleMeta;
   title: string;
@@ -38,16 +46,41 @@ export function ConfigFormShell({
   sections: Array<{ title: string; extra?: ReactNode; content: ReactNode }>;
   preview: string;
   warning?: string;
+  /** 接了后端的页面传真实提交按钮；不传保持示意按钮 */
+  actions?: ReactNode;
   /**
    * 交给 AI 助手的字段。每个字段自带 setter，所以这里不用再接一个 onApply。
    * 必填（可以为空数组）：新增一个新建页时得明确表态它的字段给不给 AI 看，
    * 而不是忘了传就默默少了一个功能。
    */
   fields: ConfigField[];
+  /** 「将要执行」直写的附加参数（表单没暴露的 CLI 参数写在这里）；不传则不渲染输入框 */
+  extraArgs?: string;
+  onExtraArgsChange?: (v: string) => void;
+  /**
+   * 携带对话上下文的预填（首页 AI 创建工具跳转而来）时自动打开助手：
+   * 开场白用 assistantIntro（需求复述 + 已填参数概览）替代默认的配置体检。
+   */
+  assistantAutoOpen?: boolean;
+  /** 助手开场白覆盖（配合 assistantAutoOpen 使用） */
+  assistantIntro?: string;
+  /** 发起创建的首页会话 id：助手直接续聊那段对话（配合 assistantAutoOpen 使用） */
+  assistantConv?: string;
+  /** 发起创建的模型 id：续聊加载该模型的 turns 桶 */
+  assistantModel?: string;
+  /** 真实提交动作：提供时助手获得 submit_form 工具（heavy 审批后触发） */
+  onSubmit?: () => void | Promise<void>;
 }) {
   const navigate = useNavigate();
   const { settings } = useSettings();
+  const { t } = useT();
   const [assistantOpen, setAssistantOpen] = useState(false);
+
+  /* AI 预填跳转而来：mount 即打开助手（尊重 AI 功能开关与字段可用性） */
+  useEffect(() => {
+    if (assistantAutoOpen && settings.aiEnabled && fields.length > 0) setAssistantOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <>
@@ -62,28 +95,32 @@ export function ConfigFormShell({
             onClick={() => navigate(module.path)}
             className="text-muted-foreground hover:text-foreground mb-0.5 inline-flex cursor-pointer items-center gap-1 text-[12.5px] transition-colors"
           >
-            <ArrowLeft size={12} /> 返回{module.label}列表
+            <ArrowLeft size={12} /> {t('shell.backToList', { module: t(module.label) })}
           </button>
         }
         extra={
           <>
             {/* 助手摆在两个提交按钮前面：它是提交之前的事，而且得比「提交运行」低一级 */}
             {settings.aiEnabled && fields.length > 0 && (
-              <Hint title="问这份配置：字段怎么填、有没有坑">
+              <Hint title={t('shell.askConfig')}>
                 <Button
                   variant={assistantOpen ? 'secondary' : 'ghost'}
                   onClick={() => setAssistantOpen(true)}
                 >
-                  <Bot /> AI 助手
+                  <Bot /> {t('task.aiAssistant')}
                 </Button>
               </Hint>
             )}
-            <Button variant="secondary" onClick={() => toast.success('已存为草稿（示意）')}>
-              <Save /> 存为草稿
-            </Button>
-            <Button onClick={() => toast.success('已提交（示意，未接后端）')}>
-              <CirclePlay /> 提交运行
-            </Button>
+            {actions ?? (
+              <>
+                <Button variant="secondary" onClick={() => toast.success(t('shell.savedDemo'))}>
+                  <Save /> {t('shell.saveDraft')}
+                </Button>
+                <Button onClick={() => toast.success(t('shell.submittedDemo'))}>
+                  <CirclePlay /> {t('shell.submitRun')}
+                </Button>
+              </>
+            )}
           </>
         }
       />
@@ -105,7 +142,7 @@ export function ConfigFormShell({
         </div>
 
         <div className="sticky top-4 w-[420px] flex-none">
-          <Panel title="将要执行">
+          <Panel title={t('shell.willRun')}>
             {/*
               这里 whitespace-pre-wrap 而不是横向滚动：预览是「读」的，
               命令太长时折行看得见全部内容比拖横条更有用；要复制的是任务目录里
@@ -114,20 +151,43 @@ export function ConfigFormShell({
             <div className="bg-muted text-foreground max-h-[420px] overflow-auto rounded-md p-3 font-mono text-xs leading-[19px] break-all whitespace-pre-wrap">
               {preview}
             </div>
+            {extraArgs !== undefined && onExtraArgsChange && (
+              <div className="mt-3 border-t pt-3">
+                <div className="text-foreground mb-1.5 text-[13px] font-medium">{t('shell.extraArgs')}</div>
+                {/*
+                  表单没暴露的 CLI 参数直接写在这里，提交时原样追加到命令行。
+                  用 textarea：参数值常带空格，一行放不下时折行可见。
+                */}
+                <textarea
+                  value={extraArgs}
+                  rows={2}
+                  placeholder={t('shell.extraArgsPlaceholder')}
+                  className="border-border bg-background text-foreground placeholder:text-muted-foreground w-full resize-y rounded-md border px-2.5 py-1.5 font-mono text-xs leading-5 outline-none focus-visible:border-ring/40"
+                  onChange={(e) => onExtraArgsChange(e.target.value)}
+                />
+                <div className="text-muted-foreground mt-1.5 text-[11px] leading-4">
+                  {t('shell.extraArgsFormat')}
+                </div>
+              </div>
+            )}
             <div className="text-muted-foreground mt-2.5 flex items-start gap-2 text-xs leading-[18px]">
               <Info size={13} className="mt-0.5 flex-none" />
-              提交后会在任务目录下生成 run.sh 与配置文件，由它负责重定向日志、执行命令、并在结束时写出退出码。
+              {t('shell.runScriptHint')}
             </div>
           </Panel>
         </div>
       </div>
 
-      <ConfigAssistant
+      <PageAssistant
         open={assistantOpen}
         onClose={() => setAssistantOpen(false)}
         module={module.key}
         fields={fields}
+        onSubmit={onSubmit}
         confirmBeforeApply={settings.aiConfirmBeforeApply}
+        intro={assistantIntro}
+        initialConv={assistantConv}
+        initialModel={assistantModel}
       />
     </>
   );

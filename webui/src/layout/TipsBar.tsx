@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Lightbulb, RotateCw, X } from 'lucide-react';
+import { ExternalLink, Lightbulb, RotateCw, X } from 'lucide-react';
 import { visibleTips } from '@/config/tips';
 import { useSettings } from '@/settings/SettingsContext';
+import { useT } from '@/i18n';
 import { ChromeIconButton } from './ChromeIconButton';
 import { TIPSBAR_H } from './metrics';
 
@@ -10,6 +11,10 @@ import { TIPSBAR_H } from './metrics';
  *
  * 放在窗口最下面一条 26px 的深色带里，跟标题栏呼应，把浅色内容区夹在中间。
  * 文案每隔一段时间换一条，淡入淡出。
+ *
+ * 带 url 的 tip 整条文字是链接（新开标签页跳原文博客），末尾一枚外链图标
+ * 提示可点；不带 url 的保持纯文本。图标放在链接外面：嵌在 <a> 里的话
+ * truncate 环境下 hover 区域和文字混在一起，点击目标含糊。
  *
  * 两个退出口分开设计：
  *  - 叉掉 = 这次别烦我，刷新后还会回来
@@ -22,6 +27,7 @@ import { TIPSBAR_H } from './metrics';
  */
 export function TipsBar() {
   const { settings, dismissTips } = useSettings();
+  const { t, locale } = useT();
   const pool = useMemo(() => visibleTips(settings.tipsBeginnerOnly), [settings.tipsBeginnerOnly]);
 
   /* 每次进来从随机一条开始，否则每次打开都是同一句 */
@@ -43,37 +49,53 @@ export function TipsBar() {
     return () => window.clearInterval(timer);
   }, [settings.tipsInterval, pool.length]);
 
-  /* 池子变小后当前下标可能越界 */
+  /* 池子变小后当前下标可能越界；文案按语种取，en 缺翻回落中文 */
   const tip = pool[idx % Math.max(1, pool.length)];
   if (!tip) return null;
+  const tipText = locale === 'en' ? (tip.en ?? tip.text) : tip.text;
 
   return (
     <div
-      className="bg-titlebar border-sidebar-border text-sidebar-foreground/60 flex shrink-0 items-center gap-2 overflow-hidden border-t pr-2 pl-3 text-[11.5px]"
+      className="bg-sidebar border-sidebar-border text-sidebar-foreground/60 flex shrink-0 items-center gap-2 overflow-hidden border-t pr-2 pl-3 text-[11.5px]"
       style={{ height: TIPSBAR_H }}
     >
       <Lightbulb size={11} className="text-titlebar-accent shrink-0" />
-      <span
-        className="min-w-0 flex-1 truncate transition-[opacity,transform] duration-200"
+      <div
+        className="flex min-w-0 flex-1 items-center gap-1 transition-[opacity,transform] duration-200"
         style={{
           opacity: visible ? 1 : 0,
           transform: visible ? 'translateY(0)' : 'translateY(3px)',
         }}
       >
-        {tip.text}
-      </span>
+        {tip.url ? (
+          <>
+            <a
+              href={tip.url}
+              target="_blank"
+              rel="noreferrer"
+              title={t('tipsbar.viewSource')}
+              className="text-sidebar-foreground/80 hover:text-sidebar-foreground min-w-0 truncate underline-offset-2 hover:underline"
+            >
+              {tipText}
+            </a>
+            <ExternalLink size={10} className="text-sidebar-foreground/50 shrink-0" />
+          </>
+        ) : (
+          <span className="min-w-0 truncate">{tipText}</span>
+        )}
+      </div>
 
       {/* side=top：这一排贴着视口底边，气泡往下弹会被裁掉 */}
       <ChromeIconButton
         icon={<RotateCw size={10} />}
-        label="换一条"
+        label={t('tipsbar.next')}
         onClick={next}
         size={18}
         side="top"
       />
       <ChromeIconButton
         icon={<X size={10} />}
-        label="本次关闭。想以后都不显示，去偏好设置里关掉"
+        label={t('tipsbar.dismissOnce')}
         onClick={dismissTips}
         size={18}
         side="top"

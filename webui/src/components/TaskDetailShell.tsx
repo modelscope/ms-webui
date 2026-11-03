@@ -1,6 +1,7 @@
-import { forwardRef, type ComponentProps, type ReactNode } from 'react';
+import { forwardRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
+  Bot,
   ChevronLeft,
   Check,
   MoreHorizontal,
@@ -26,7 +27,10 @@ import {
 import { PageHeader } from './PageHeader';
 import { Column } from './Column';
 import { StatusTag } from './StatusTag';
+import { useT } from '@/i18n';
 import { CopyText } from './CopyText';
+import { CodeBlock } from './CodeBlock';
+import { RenameDialog, type RenameTarget } from './RenameDialog';
 import type { ModuleMeta } from '@/theme/modules';
 import { features } from '@/config/features';
 import type { TaskItem } from '@/mock/types';
@@ -177,6 +181,11 @@ export function TaskDetailShell({
   activeTab,
   extraMeta,
   actions,
+  onRefresh,
+  onRename,
+  onStop,
+  stopTooltip,
+  onAssistant,
 }: {
   module: ModuleMeta;
   tasks: TaskItem[];
@@ -186,18 +195,30 @@ export function TaskDetailShell({
   extraMeta?: ReactNode;
   /** 模块特有的操作按钮，放在通用操作左侧 */
   actions?: ReactNode;
+  /** 手动刷新回调（立即拉一帧）；不传则刷新按钮仍是示意态 */
+  onRefresh?: () => Promise<void>;
+  /** 重命名当前任务的回调；不传则菜单项仍是示意态 */
+  onRename?: (id: string, name: string) => Promise<void>;
+  /** 停止当前任务的回调；不传则内置停止按钮仍是示意态 */
+  onStop?: (id: string) => Promise<void>;
+  /** 停止按钮的说明文案；不传用默认的「SIGTERM 优雅关停」（模块间停止语义不同，如研究页只断关联不杀进程） */
+  stopTooltip?: string;
+  /** 页面 AI 助手入口（打开各页挂的 PageAssistant）；不传不显示按钮 */
+  onAssistant?: () => void;
 }) {
   const { id } = useParams();
   const navigate = useNavigate();
-  const task = tasks.find((t) => t.id === id);
+  const { t } = useT();
+  const [renaming, setRenaming] = useState<RenameTarget | null>(null);
+  const task = tasks.find((task) => task.id === id);
 
   if (!task) {
     return (
       <div className="flex flex-col items-center gap-4 py-24">
         <div className="text-muted-foreground text-sm">
-          找不到任务 <span className="font-mono">{id}</span>
+          {t('shell.taskNotFound', { id: id ?? '' })}
         </div>
-        <ActionButton onClick={() => navigate(module.path)}>返回{module.label}</ActionButton>
+        <ActionButton onClick={() => navigate(module.path)}>{t('shell.backTo', { module: t(module.label) })}</ActionButton>
       </div>
     );
   }
@@ -218,34 +239,56 @@ export function TaskDetailShell({
             to={module.path}
             className="text-muted-foreground hover:text-foreground mb-2 inline-flex items-center gap-1 text-[12.5px] transition-colors"
           >
-            <ChevronLeft size={12} /> {module.label}
+            <ChevronLeft size={12} /> {t(module.label)}
           </Link>
         }
         extra={
           <>
             {actions}
+            {onAssistant && (
+              <ActionButton icon={<Bot />} tooltip={t('task.aiAssistant')} onClick={onAssistant} />
+            )}
             <ActionButton
               icon={<RotateCw />}
-              tooltip="刷新"
-              onClick={() => toast.success('已刷新（示意）')}
+              tooltip={t('task.refresh')}
+              onClick={() => {
+                if (onRefresh) {
+                  void onRefresh()
+                    .then(() => toast.success(t('task.refreshed')))
+                    .catch((e) => toast.error(String(e)));
+                } else {
+                  toast.success(t('task.refreshedDemo'));
+                }
+              }}
             />
             {task.status === 'RUNNING' && canPause && (
               <ActionButton
                 icon={<Pause />}
-                tooltip="暂停后服务端仍保留训练状态，显存不释放"
-                onClick={() => toast.info('暂停（示意）')}
+                tooltip={t('task.pauseHint')}
+                onClick={() => toast.info(t('task.pauseDemo'))}
               >
-                暂停
+                {t('task.pause')}
               </ActionButton>
             )}
             {task.status === 'PAUSED' && (
-              <ActionButton tone="primary" icon={<Play />} onClick={() => toast.info('继续（示意）')}>
-                继续
+              <ActionButton tone="primary" icon={<Play />} onClick={() => toast.info(t('task.resumeDemo'))}>
+                {t('task.resume')}
               </ActionButton>
             )}
             {task.status === 'RUNNING' && (
-              <ActionButton tone="danger" icon={<Square />} onClick={() => toast.info('停止（示意）')}>
-                停止
+              <ActionButton
+                tone="danger"
+                icon={<Square />}
+                tooltip={onStop ? stopTooltip ?? t('task.sigtermHint') : undefined}
+                onClick={
+                  onStop && id
+                    ? () => {
+                        void onStop(id).catch((e) => toast.error(String(e)));
+                      }
+                    : () => toast.info(t('task.stopDemo'))
+                }
+              >
+                {t('task.stop')}
               </ActionButton>
             )}
             <DropdownMenu>
@@ -253,16 +296,28 @@ export function TaskDetailShell({
                 <ActionButton icon={<MoreHorizontal />} />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => toast.info('示意，未接后端')}>
-                  重命名
+                <DropdownMenuItem
+                  onClick={() =>
+                    onRename && id
+                      ? setRenaming({ id, label: task.label })
+                      : toast.info(t('task.renameDemo'))
+                  }
+                >
+                  {t('task.rename')}
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => toast.info('示意，未接后端')}>
-                  以此为模板新建
+                {/*
+                 * 以此为模板新建：带来源 id 跳新建页，由各模块的新建页解析预填。
+                 * 未接后端的模块（train/export）忽略该参数，退化为普通新建。
+                 */}
+                <DropdownMenuItem
+                  onClick={() => navigate(`${module.path}/new?from=${encodeURIComponent(task.id)}`)}
+                >
+                  {t('task.useAsTemplate')}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" onClick={() => toast.info('示意，未接后端')}>
+                <DropdownMenuItem variant="destructive" onClick={() => toast.info(t('task.demoBadge'))}>
                   <Trash2 />
-                  删除
+                  {t('task.delete')}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -272,43 +327,75 @@ export function TaskDetailShell({
 
       <Column wide className="pb-10">
         {task.status === 'PAUSED' && (
-          <Notice tone="warn" title="任务已暂停，但服务端仍占用显存">
-            本地客户端进程已退出，服务端仍在 GPU 中保留模型与优化器状态。点「继续」可无损续跑；确定不再需要请点「停止」，那会真正释放服务端资源。
+          <Notice tone="warn" title={t('task.pausedBanner')}>
+            {t('task.pausedDetail')}
           </Notice>
         )}
         {task.status === 'FAILED' && task.error && (
-          <Notice tone="error" title="任务失败">
+          <Notice tone="error" title={t('task.failedBanner')}>
             {task.error}
           </Notice>
         )}
 
         {/* 元信息条：取代 Descriptions */}
         <MetaStrip>
-          <MetaCell label="模型 / 来源" value={task.model} />
-          <MetaCell label="运行方式" value={task.runner} />
+          <MetaCell label={t('task.metaModel')} value={task.model} />
+          <MetaCell label={t('task.metaRunMode')} value={task.runner} />
           <MetaCell
-            label="服务端"
-            value={task.serverUrl ?? <span className="text-muted-foreground">本地</span>}
+            label={t('task.metaServer')}
+            value={task.serverUrl ?? <span className="text-muted-foreground">{t('task.metaLocal')}</span>}
           />
-          <MetaCell label="创建时间" value={<span className="tabular">{task.createdAt}</span>} />
+          <MetaCell label={t('task.metaCreated')} value={<span className="tabular">{task.createdAt}</span>} />
           {task.endpoint && (
-            <MetaCell label="服务地址" value={<CopyText text={task.endpoint} mono />} />
+            <MetaCell label={t('task.metaServerUrl')} value={<CopyText text={task.endpoint} mono />} />
           )}
           <MetaCell
-            label="任务 id"
+            label={t('task.metaTaskId')}
             value={<span className="font-mono text-[12.5px]">{task.id}</span>}
           />
           {extraMeta}
         </MetaStrip>
 
-        <TabStrip
-          tabs={tabs}
-          activeKey={current.key}
-          onChange={(k) => navigate(`${module.path}/${task.id}/${k}`)}
-        />
+        {/*
+         * 创建命令：把「这个任务是怎么拉起来的」还原成可直接复现的 CLI。
+         * 放在元信息条与 Tab 之间——它是任务级事实（属于哪个 Tab 都该看得到），
+         * 且 curl/Python 这类使用示例只在概览 Tab，两者不抢位置。
+         */}
+        {task.createCommand && (
+          <Panel
+            title={t('task.metaCommand')}
+            extra={<span className="text-muted-foreground text-xs">{t('task.copyCommandHint')}</span>}
+          >
+            <CodeBlock code={task.createCommand} />
+          </Panel>
+        )}
 
-        {current.content}
+        {current ? (
+          <>
+            <TabStrip
+              tabs={tabs}
+              activeKey={current.key}
+              onChange={(k) => navigate(`${module.path}/${task.id}/${k}`)}
+            />
+
+            {current.content}
+          </>
+        ) : (
+          /* 调用方数据未就绪时会传空 tabs（研究会话详情在 session 拉到前的
+           * 首帧）：此时 current 是 undefined，直接读 .key 会把整页炸成
+           * react-router 的默认错误页且不再自愈——占位一拍等数据到位。 */
+          <div className="text-muted-foreground py-16 text-center text-sm">{t('shell.tabsPending')}</div>
+        )}
       </Column>
+
+      {renaming && onRename && (
+        <RenameDialog
+          key={renaming.id}
+          target={renaming}
+          onConfirm={onRename}
+          onClose={() => setRenaming(null)}
+        />
+      )}
     </>
   );
 }

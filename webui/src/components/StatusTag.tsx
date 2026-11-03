@@ -1,5 +1,6 @@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { TaskStatus } from '@/mock/types';
+import { useT, type MessageKey } from '@/i18n';
 
 /**
  * 状态标签。状态集合与设计文档一致：RUNNING / DONE / FAILED / PAUSED，没有第五种。
@@ -15,32 +16,33 @@ import type { TaskStatus } from '@/mock/types';
  *
  * tooltip 写清每种状态的判定来源，避免用户把 PAUSED 当成已结束。
  */
-const STATUS_META: Record<TaskStatus, { text: string; token: string; live?: boolean; hint: string }> =
+const STATUS_META: Record<TaskStatus, { text: MessageKey; token: string; live?: boolean; hint: MessageKey }> =
   {
     RUNNING: {
-      text: '运行中',
+      text: 'status.running',
       token: '--state-running',
       live: true,
-      hint: '进程存活，且尚未写出 exit_code',
+      hint: 'status.runningHint',
     },
     DONE: {
-      text: '已完成',
+      text: 'status.done',
       token: '--state-done',
-      hint: 'exit_code = 0，或被用户主动停止',
+      hint: 'status.doneHint',
     },
     FAILED: {
-      text: '失败',
+      text: 'status.failed',
       token: '--state-failed',
-      hint: 'exit_code ≠ 0，或进程已死但没留下 exit_code（如被 OOM kill）',
+      hint: 'status.failedHint',
     },
     PAUSED: {
-      text: '已暂停',
+      text: 'status.paused',
       token: '--state-paused',
-      hint: '本地进程已退出，但服务端仍保留训练状态，显存未释放，可继续',
+      hint: 'status.pausedHint',
     },
   };
 
 export function StatusTag({ status }: { status: TaskStatus }) {
+  const { t } = useT();
   const s = STATUS_META[status];
   const c = `var(${s.token})`;
 
@@ -60,10 +62,10 @@ export function StatusTag({ status }: { status: TaskStatus }) {
             className={s.live ? 'status-dot-live' : undefined}
             style={{ width: 5, height: 5, borderRadius: '50%', background: c, flex: 'none' }}
           />
-          {s.text}
+          {t(s.text)}
         </span>
       </TooltipTrigger>
-      <TooltipContent>{s.hint}</TooltipContent>
+      <TooltipContent>{t(s.hint)}</TooltipContent>
     </Tooltip>
   );
 }

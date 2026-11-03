@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
-import { ArrowUp, Bot, Check, User, X, Zap } from 'lucide-react';
+import { ArrowUp, Bot, Check, Loader2, Square, User, X, Zap } from 'lucide-react';
 import { cn } from 'cn';
 import { Hint } from '@/components/Hint';
+import { useT } from '@/i18n';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 
@@ -61,17 +62,24 @@ export function AiChatPanel<A>({
   messages,
   describe,
   onSend,
+  onStop,
+  stopping,
   onAction,
   draft,
   onDraftChange,
   suggestions,
   confirmBeforeApply,
   accent = 'var(--primary)',
-  placeholder = '问点什么……',
+  placeholder,
+  footerNote,
 }: {
   messages: AiMessage<A>[];
   describe: (a: A) => ProposalView;
   onSend: () => void;
+  /** 流式进行中的停止入口；不传则发送键不变形 */
+  onStop?: () => void;
+  /** 已点停止、流尚未结束：按钮转圈（配合 onStop） */
+  stopping?: boolean;
   onAction: (msgId: string, index: number, next: Exclude<ActionState, 'pending'>) => void;
   draft: string;
   onDraftChange: (v: string) => void;
@@ -82,8 +90,11 @@ export function AiChatPanel<A>({
   /** 头像颜色。节点面板里传节点主色，认得出这段对话是在问谁 */
   accent?: string;
   placeholder?: string;
+  /** 输入框下的说明行。接了真模型的使用方改写成自己的实情 */
+  footerNote?: string;
 }) {
   const tail = useRef<HTMLDivElement>(null);
+  const { t } = useT();
 
   // 新消息进来滚到底。依赖里带上最后一条的 id，避免只改 states 时也滚
   const lastId = messages[messages.length - 1]?.id;
@@ -114,7 +125,7 @@ export function AiChatPanel<A>({
                   m.role === 'user' ? 'bg-secondary' : 'bg-muted',
                 )}
               >
-                {m.pending ? <span className="text-muted-foreground">正在想……</span> : m.text}
+                {m.pending ? <span className="text-muted-foreground">{t('chatPanel.thinking')}</span> : m.text}
               </div>
             </div>
 
@@ -169,14 +180,39 @@ export function AiChatPanel<A>({
                 send();
               }
             }}
-            placeholder={placeholder}
+            placeholder={placeholder ?? t('chatPanel.placeholder')}
             className="max-h-28 min-h-6 resize-none border-0 bg-transparent p-0 text-[13px] shadow-none focus-visible:ring-0"
           />
-          <Button size="icon" className="size-7 flex-none rounded-full" disabled={!draft.trim()} onClick={send}>
-            <ArrowUp />
-          </Button>
+          {onStop ? (
+            /* 停止键与首页同款触感：按压缩放 + 呼吸光晕 + 点击后转圈 */
+            <Button
+              size="icon"
+              className="bg-state-failed hover:bg-state-failed/90 relative size-7 flex-none rounded-full text-white transition-transform active:scale-90"
+              onClick={onStop}
+              disabled={stopping}
+              title={stopping ? t('chatPanel.stopping') : t('chatPanel.stopGen')}
+            >
+              {stopping ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <>
+                  <span className="bg-state-failed/40 pointer-events-none absolute inset-0 animate-ping rounded-full" />
+                  <Square size={12} className="relative" />
+                </>
+              )}
+            </Button>
+          ) : (
+            <Button
+              size="icon"
+              className="size-7 flex-none rounded-full transition-transform active:scale-90"
+              disabled={!draft.trim()}
+              onClick={send}
+            >
+              <ArrowUp />
+            </Button>
+          )}
         </div>
-        <div className="text-muted-foreground mt-1.5 text-[11px]">回答是本地示意，未接后端模型</div>
+        <div className="text-muted-foreground mt-1.5 text-[11px]">{footerNote ?? t('chatPanel.demoHint')}</div>
       </div>
     </div>
   );
@@ -200,6 +236,7 @@ function ActionCard({
   onApply: () => void;
   onIgnore: () => void;
 }) {
+  const { t } = useT();
   const done = state !== 'pending';
 
   return (
@@ -220,9 +257,9 @@ function ActionCard({
       {state === 'pending' ? (
         <span className="flex flex-none gap-1">
           <Button size="sm" className="h-6 px-2.5 text-xs" onClick={onApply}>
-            应用
+            {t('chatPanel.apply')}
           </Button>
-          <Hint title="不采纳这条建议">
+          <Hint title={t('chatPanel.discard')}>
             <Button variant="ghost" size="icon" className="size-6" onClick={onIgnore}>
               <X />
             </Button>
@@ -233,10 +270,10 @@ function ActionCard({
           {state === 'applied' ? (
             <>
               <Check className="size-2.5" />
-              已应用
+              {t('chatPanel.applied')}
             </>
           ) : (
-            '已忽略'
+            t('chatPanel.discarded')
           )}
         </span>
       )}

@@ -12,6 +12,7 @@ import {
   ReactFlowProvider,
   useConnection,
   useReactFlow,
+  useStoreApi,
 } from '@xyflow/react';
 import type {
   Connection,
@@ -24,6 +25,7 @@ import type {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
+  ArrowLeftRight,
   Bot,
   Check,
   Copy,
@@ -40,8 +42,45 @@ import {
 import { toast } from 'sonner';
 import { cn } from 'cn';
 import { Hint } from '@/components/Hint';
-import { NODE_TYPES, NODE_W, PORT_TYPES, findPort } from './nodeTypes';
+import { useT } from '@/i18n';
+import { NODE_TYPES, NODE_W, PORT_TYPES, findPortOf, nodeDefOf, nodeLabel } from './nodeTypes';
+import type { TFn } from './nodeTypes';
+import { ROLE_HINTS } from './registryNodes';
 import type { GraphEdge, GraphFrame, GraphNode, PortDef } from './nodeTypes';
+
+/** 框与成员之间的留白。两边各留这些，框不至于贴着节点 */
+const FRAME_PAD = 40;
+
+/**
+ * 节点名义高度：头部 + 端口行 + 参数行的粗估。框是背景标注不是精确容器，
+ * 宁可框大不可框不全，估高一点无妨。
+ */
+function nominalHeight(node: GraphNode): number {
+  const def = nodeDefOf(node);
+  if (!def) return 220;
+  return 48 + Math.max(def.inputs.length, def.outputs.length) * 30 + def.params.length * 32 + 24;
+}
+
+/** 口身份的展示文案：有映射的 role 翻译，没映射的原样显示 */
+function roleText(role: string | undefined, t: TFn): string | undefined {
+  if (!role) return undefined;
+  const key = ROLE_HINTS[role];
+  return key ? t(key) : role;
+}
+
+/**
+ * 框的位置：有成员就按成员 bbox 自动包裹（每次渲染重算，拖节点框跟着走），
+ * 没成员用手排坐标。手排坐标在两种情况下仍是后备：成员全部被删、或没声明成员。
+ */
+function frameBox(f: GraphFrame, nodes: GraphNode[]) {
+  const members = f.memberIds?.length ? nodes.filter((n) => f.memberIds!.includes(n.id)) : [];
+  if (!members.length) return { x: f.x, y: f.y, w: f.w, h: f.h };
+  const x = Math.min(...members.map((n) => n.x)) - FRAME_PAD;
+  const y = Math.min(...members.map((n) => n.y)) - FRAME_PAD;
+  const w = Math.max(...members.map((n) => n.x)) + NODE_W + FRAME_PAD - x;
+  const h = Math.max(...members.map((n) => n.y + nominalHeight(n))) + FRAME_PAD - y;
+  return { x, y, w, h };
+}
 
 /**
  * 节点画布。深底 + 点阵网格，节点是厚边框的卡片，连线是粗贝塞尔曲线。
@@ -70,6 +109,8 @@ interface NodeActions {
   onAskAi?: (id: string) => void;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
+  /** 翻转整对顺序口的朝向（after左/then右 ↔ then左/after右），让环闭合 */
+  onFlipNode: (id: string) => void;
 }
 const ActionsCtx = createContext<NodeActions | null>(null);
 
@@ -81,6 +122,9 @@ const FIT_ALL: FitViewOptions = { padding: 0.08, minZoom: 0.3, maxZoom: 1 };
 export interface NodeCanvasProps {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** 本次执行的边范围；null 表示尚无执行记录，不由节点历史状态推断。 */
+  activeEdges: string[] | null;
+  usedEdges: string[];
   /** 循环容器。画在最底层，只标出“这一块每步重跑”，不参与交互 */
   frames?: GraphFrame[];
   selected: string | null;
@@ -97,6 +141,8 @@ export interface NodeCanvasProps {
   aiEnabled?: boolean;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
+  /** 把顺序口（after/then）整对左右对调，让环闭合 */
+  onFlipNode: (id: string) => void;
   /** 删连线。选中一根线按 Del 就走这里 */
   onDeleteEdges?: (ids: string[]) => void;
   /** 值变化时自动缩放到刚好装下整张图，切换示例后用它复位视角 */
@@ -117,6 +163,8 @@ export function NodeCanvas(props: NodeCanvasProps) {
 function Canvas({
   nodes,
   edges,
+  activeEdges,
+  usedEdges,
   frames = [],
   selected,
   onSelect,
@@ -129,80 +177,145 @@ function Canvas({
   aiEnabled = true,
   onDuplicate,
   onDelete,
+  onFlipNode,
   onDeleteEdges,
   fitSignal = 0,
   viewCenterRef,
 }: NodeCanvasProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const { fitView, screenToFlowPosition, zoomIn, zoomOut } = useReactFlow();
+  const store = useStoreApi();
+  const { t } = useT();
 
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
+  /*
+   * 节点对象引用复用：没变的节点沿用上一轮的对象引用。
+   *
+   * React Flow 受控模式下，传入新对象会触发 re-adopt；若这一拍 ResizeObserver
+   * 没派发（预览面板不可见、窗口失焦），节点会永久停在 visibility:hidden。
+   * 引用不变则 RF 跳过该节点的 re-adopt，测量结果天然保留。
+   *
+   * 引用必然变化的对象（被拖的那个，拖动逐帧回写坐标）用另一道保险：构造时
+   * 直接从 RF store 的 nodeLookup 读出上一帧的 measured 带上——adopt 源码里
+   * measured 从受控对象上读，带了就不重置，handleBounds 也从旧内部节点解析保留。
+   * 不能事后用 effect 读回：effect 在 render 之后才跑，而 re-adopt 在 render 时
+   * 已经发生，第一帧读到的永远是空。
+   */
+  const lastFlow = useRef<Node[]>([]);
   const flowNodes = useMemo<Node[]>(
-    () => [
+    () => {
+      const prev = new Map(lastFlow.current.map((n) => [n.id, n]));
+      const built: Node[] = [];
       /*
        * 循环框做成压在最底下的节点（zIndex -1 会落到连线层下面），
-       * 这样它跟着平移缩放走，不用自己算坐标。它只是一块背景标注，
-       * 说明「框住的这几个节点每步重跑」，不是真容器：
-       * 拖节点不会跟随，拖出框外也不会被移出循环。
+       * 这样它跟着平移缩放走，不用自己算坐标。
+       *
+       * 有成员的框按成员 bbox 自动包裹（拖动跟随），没成员的用手排坐标。
        */
-      ...frames.map((f) => ({
-        id: `frame:${f.id}`,
-        type: 'frame',
-        position: { x: f.x, y: f.y },
-        width: f.w,
-        height: f.h,
-        data: { frame: f },
-        zIndex: -1,
-        selectable: false,
-        draggable: false,
-        deletable: false,
-        focusable: false,
-        /* 事件全部放过去，点框里的空白仍然是在拖画布 */
-        style: { pointerEvents: 'none' as const },
-      })),
-      ...nodes.map((n) => ({
-        id: n.id,
-        type: 'swift',
-        position: { x: n.x, y: n.y },
-        data: { node: n },
-        selected: n.id === selected,
-        /* 只能拖标题栏移动节点，body 里有可点的东西 */
-        dragHandle: '.swift-node-header',
-        style: { width: NODE_W },
-      })),
-    ],
+      built.push(
+        ...frames.map((f): Node => {
+          const box = frameBox(f, nodes);
+          const p = prev.get(`frame:${f.id}`);
+          if (
+            p &&
+            p.position.x === box.x &&
+            p.position.y === box.y &&
+            p.width === box.w &&
+            p.height === box.h &&
+            (p.data as { frame: GraphFrame }).frame === f
+          ) {
+            return p;
+          }
+          return {
+            id: `frame:${f.id}`,
+            type: 'frame',
+            position: { x: box.x, y: box.y },
+            width: box.w,
+            height: box.h,
+            data: { frame: f },
+            zIndex: -1,
+            selectable: false,
+            draggable: false,
+            deletable: false,
+            focusable: false,
+            /* 事件全部放过去，点框里的空白仍然是在拖画布 */
+            style: { pointerEvents: 'none' as const },
+          };
+        }),
+      );
+      built.push(
+        ...nodes.map((n): Node => {
+          const p = prev.get(n.id);
+          if (
+            p &&
+            p.position.x === n.x &&
+            p.position.y === n.y &&
+            (p.data as { node: GraphNode }).node === n &&
+            p.selected === (n.id === selected)
+          ) {
+            return p;
+          }
+          return {
+            id: n.id,
+            type: 'swift',
+            position: { x: n.x, y: n.y },
+            data: { node: n },
+            selected: n.id === selected,
+            measured: store.getState().nodeLookup.get(n.id)?.measured,
+            /* 只能拖标题栏移动节点，body 里有可点的东西 */
+            dragHandle: '.swift-node-header',
+            style: { width: NODE_W },
+          };
+        }),
+      );
+      return built;
+    },
     [nodes, frames, selected],
   );
+  useEffect(() => {
+    lastFlow.current = flowNodes;
+  }, [flowNodes]);
 
   const flowEdges = useMemo<Edge[]>(
-    () =>
-      edges.map((ed) => {
+    () => {
+      /* 本次范围内，真实运行者的出线流动；下游等待不影响上游指示。
+       * 已使用的边常亮静止；范围外和未使用的边压暗，不借用历史节点状态。 */
+      const active = new Set(activeEdges ?? []);
+      const used = new Set(usedEdges);
+      return edges.map((ed) => {
         const src = byId.get(ed.from);
-        const p = src ? findPort(src.type, ed.fromPort, 'out') : undefined;
+        const p = findPortOf(src, ed.fromPort, 'out');
         /* 连线颜色取端口数据类型，不取节点色——一眼看出这根线在传什么 */
         const color = p ? PORT_TYPES[p.type].color : '#6B7280';
+        /* 空 token 线只表先后不传数据：细一档、虚线，和数据线一眼分开 */
+        const isCtrl = p?.type === 'CTRL';
+        const flowing = active.has(ed.id) && src?.status === 'running';
+        const dim = activeEdges !== null && !(flowing || (active.has(ed.id) && used.has(ed.id)));
         return {
           id: ed.id,
           source: ed.from,
           sourceHandle: ed.fromPort,
           target: ed.to,
           targetHandle: ed.toPort,
-          /* 上游正在跑，线上的虚线往前流。animated 是 RF 自带的 */
-          animated: src?.status === 'running',
+          /* 源节点实际运行时，其本次出线向前流动（animated 是 RF 自带的）。 */
+          animated: flowing,
           style: {
             /*
              * 设 --xy-edge-stroke 而不是直接写 stroke：直接写是内联样式，
              * 会压掉 RF 那条「选中时换色」的规则，选中就看不出来了。
              */
             '--xy-edge-stroke': color,
-            strokeWidth: 3.5,
+            strokeWidth: isCtrl ? 2 : 3.5,
+            strokeDasharray: isCtrl ? '6 5' : undefined,
             /* 深底点阵上连线要有厚度，原来靠垫一条更粗的暗线，一个投影就够 */
             filter: 'drop-shadow(0 0 2px rgba(0,0,0,0.85))',
+            opacity: dim ? 0.3 : 1,
           } as CSSProperties,
         };
-      }),
-    [edges, byId],
+      });
+    },
+    [edges, byId, activeEdges, usedEdges],
   );
 
   /**
@@ -212,15 +325,15 @@ function Canvas({
    */
   const check = useCallback(
     (from: string, fromPort: string, to: string, toPort: string) => {
-      if (from === to) return '不能连到自己身上';
+      if (from === to) return t('wf.errSelf');
       const a = byId.get(from);
       const b = byId.get(to);
-      if (!a || !b) return '节点不存在';
-      const pa = findPort(a.type, fromPort, 'out');
-      const pb = findPort(b.type, toPort, 'in');
-      if (!pa || !pb) return '端口不存在';
+      if (!a || !b) return t('wf.errNodeMissing');
+      const pa = findPortOf(a, fromPort, 'out');
+      const pb = findPortOf(b, toPort, 'in');
+      if (!pa || !pb) return t('wf.errPortMissing');
       if (pa.type !== pb.type) {
-        return `类型不匹配：${PORT_TYPES[pa.type].label} 接不到 ${PORT_TYPES[pb.type].label} 上`;
+        return t('wf.errTypeMismatch', { a: t(PORT_TYPES[pa.type].label), b: t(PORT_TYPES[pb.type].label) });
       }
       /*
        * 锁定节点拒收任何手拉的连线。轨迹过滤就是这种：它的两路数据必须
@@ -228,14 +341,14 @@ function Canvas({
        * 类型全匹配，上面那两道检查都拦不住。
        */
       if (NODE_TYPES[b.type]?.lockedPorts) {
-        return `${NODE_TYPES[b.type].label} 的连线已锁定：两路数据必须同进同出，接错不报错`;
+        return t('wf.errLockedTarget', { label: nodeLabel(NODE_TYPES[b.type], t) });
       }
       if (NODE_TYPES[a.type]?.lockedPorts) {
-        return `${NODE_TYPES[a.type].label} 的输出已锁定，不能单独引出一路`;
+        return t('wf.errLockedSource', { label: nodeLabel(NODE_TYPES[a.type], t) });
       }
       return null;
     },
-    [byId],
+    [byId, t],
   );
 
   const handleConnect = useCallback(
@@ -251,6 +364,10 @@ function Canvas({
   /*
    * 尺寸变化由 RF 自己在内部记着；选中态是受控的（flowNodes 里按 selected 写死），
    * 所以这里只需要把拖动后的坐标写回去。
+   *
+   * 受控模式下拖动中必须逐帧回写：RF 不做乐观位置更新，位置跟随完全靠
+   * 外部 state 驱动（试过只往松开那帧写，结果拖动中节点钉在原地、松开才跳过去）。
+   * 逐帧 re-adopt 的测量丢失由 measured 保险兑住。
    */
   const handleNodesChange = useCallback<OnNodesChange>(
     (changes) => {
@@ -300,8 +417,9 @@ function Canvas({
       onAskAi: aiEnabled ? onAskAi : undefined,
       onDuplicate,
       onDelete,
+      onFlipNode,
     }),
-    [onRunNode, onOpenOutput, onAskAi, aiEnabled, onDuplicate, onDelete],
+    [onRunNode, onOpenOutput, onAskAi, aiEnabled, onDuplicate, onDelete, onFlipNode],
   );
 
   /** 当前图里出现过的数据类型，给图例用 */
@@ -309,11 +427,13 @@ function Canvas({
     const seen = new Set<string>();
     for (const ed of edges) {
       const src = byId.get(ed.from);
-      const p = src ? findPort(src.type, ed.fromPort, 'out') : undefined;
+      const p = findPortOf(src, ed.fromPort, 'out');
       if (p) seen.add(p.type);
     }
     return [...seen] as (keyof typeof PORT_TYPES)[];
   }, [edges, byId]);
+
+  const legendLabel = (pt: keyof typeof PORT_TYPES) => t(PORT_TYPES[pt].label);
 
   return (
     <div ref={wrapRef} className="bg-titlebar relative min-w-0 flex-1">
@@ -376,16 +496,16 @@ function Canvas({
           {legendTypes.length > 0 && (
             <Panel position="bottom-left">
               <div className="border-sidebar-border flex max-w-85 flex-wrap gap-x-3 gap-y-1 rounded-[10px] border bg-black/55 px-2.5 py-1.5 backdrop-blur-sm">
-                {legendTypes.map((t) => (
+                {legendTypes.map((pt) => (
                   <span
-                    key={t}
+                    key={pt}
                     className="text-sidebar-foreground/60 inline-flex items-center gap-1.5 text-[11px]"
                   >
                     <span
                       className="h-[3px] w-3.5 rounded-sm"
-                      style={{ background: PORT_TYPES[t].color }}
+                      style={{ background: PORT_TYPES[pt].color }}
                     />
-                    {PORT_TYPES[t].label}
+                    {legendLabel(pt)}
                   </span>
                 ))}
               </div>
@@ -394,13 +514,13 @@ function Canvas({
 
           {/* 三个按钮自己写而不是用 Controls 自带的：自带的提示文案是英文的 */}
           <Controls showZoom={false} showFitView={false} showInteractive={false}>
-            <ControlButton onClick={() => zoomOut()} title="缩小">
+            <ControlButton onClick={() => zoomOut()} title={t('wf.zoomOut')}>
               <Minus />
             </ControlButton>
-            <ControlButton onClick={() => zoomIn()} title="放大">
+            <ControlButton onClick={() => zoomIn()} title={t('wf.zoomIn')}>
               <Plus />
             </ControlButton>
-            <ControlButton onClick={() => fitView(FIT_ALL)} title="缩放到看得见全图">
+            <ControlButton onClick={() => fitView(FIT_ALL)} title={t('wf.fitAll')}>
               <Maximize2 />
             </ControlButton>
           </Controls>
@@ -419,8 +539,10 @@ function Canvas({
 function linkSelector(c: ConnectionState) {
   if (!c.inProgress || !c.fromHandle?.id) return '';
   const g = (c.fromNode.data as SwiftNodeData).node;
-  const p = findPort(g.type, c.fromHandle.id, 'out');
-  return p ? `${p.type}|${g.id}` : '';
+  /* 拖线可以从输出口出发，也可以从输入口倒着找源——两个方向都要引导 */
+  const dir = c.fromHandle.type === 'source' ? 'out' : 'in';
+  const p = findPortOf(g, c.fromHandle.id, dir);
+  return p ? `${dir}|${p.type}|${g.id}` : '';
 }
 
 const HEADER_BTN =
@@ -430,10 +552,11 @@ const HEADER_BTN =
 const SwiftNodeView = memo(function SwiftNodeView({ id, data, selected }: NodeProps) {
   /* nodeTypes 那边只认 NodeProps 这一种签名，泛型在这个边界上丢了，转回来 */
   const { node } = data as SwiftNodeData;
-  const def = NODE_TYPES[node.type];
+  const def = nodeDefOf(node) ?? NODE_TYPES[node.type];
   const act = useContext(ActionsCtx);
   const link = useConnection(linkSelector);
-  const [linkType, linkFrom] = link.split('|');
+  const { t } = useT();
+  const [linkDir, linkType, linkFrom] = link.split('|');
 
   const params = node.params ?? def.params;
   const code = node.code ?? def.code;
@@ -441,6 +564,25 @@ const SwiftNodeView = memo(function SwiftNodeView({ id, data, selected }: NodePr
   const hasOutput = node.status === 'done' || node.status === 'failed';
   /** 连线锁定：输出口拖不出来，标题栏挂个锁把原因说在提示里 */
   const locked = !!def.lockedPorts;
+  /** 有顺序口才有朝向可翻：正向 after左/then右，反向 then左/after右 */
+  const hasCtrl = [...def.inputs, ...def.outputs].some((p) => p.type === 'CTRL');
+
+  /*
+   * 端口分侧：数据口按惯例（输入左、输出右）；顺序口（CTRL）整对读朝向——
+   * 反向时 after 到右列、then 到左列，环下方那一段就顺了。
+   */
+  const sideOf = (p: PortDef, dir: 'in' | 'out') =>
+    p.type === 'CTRL' && node.portSides?.[p.key]
+      ? node.portSides[p.key]
+      : dir === 'in'
+        ? 'left'
+        : 'right';
+  const allPorts: Array<{ p: PortDef; dir: 'in' | 'out' }> = [
+    ...def.inputs.map((p) => ({ p, dir: 'in' as const })),
+    ...def.outputs.map((p) => ({ p, dir: 'out' as const })),
+  ];
+  const leftPorts = allPorts.filter((x) => sideOf(x.p, x.dir) === 'left');
+  const rightPorts = allPorts.filter((x) => sideOf(x.p, x.dir) === 'right');
 
   return (
     <div
@@ -461,13 +603,13 @@ const SwiftNodeView = memo(function SwiftNodeView({ id, data, selected }: NodePr
       >
         <span className="inline-flex text-white/95 [&>svg]:size-3.5">{def.icon}</span>
         <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold tracking-wide text-white">
-          {def.label}
+          {nodeLabel(def, t)}
         </span>
 
         <StatusDot status={node.status} />
 
         {locked && (
-          <Hint title="这个节点的连线不能改：两路数据必须同进同出，接错不报错">
+          <Hint title={t('wf.lockedHint')}>
             <span className="shrink-0 text-white/90 [&>svg]:size-3">
               <Lock />
             </span>
@@ -487,13 +629,23 @@ const SwiftNodeView = memo(function SwiftNodeView({ id, data, selected }: NodePr
           onClick={(e) => e.stopPropagation()}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <Hint title={def.runnable ? '只运行这个节点' : '这是声明式节点，跑一次只是把它准备好'}>
+          {hasCtrl && (
+            <Hint title={t('wf.flipHint')}>
+              <span
+                className={cn(HEADER_BTN, !selected && 'opacity-0 group-hover/act:opacity-100')}
+                onClick={() => act?.onFlipNode(id)}
+              >
+                <ArrowLeftRight />
+              </span>
+            </Hint>
+          )}
+          <Hint title={def.runnable ? t('wf.runNodeHint') : t('wf.declaredHint')}>
             <span className={HEADER_BTN} onClick={() => act?.onRunNode(id)}>
               {running ? <Loader2 className="animate-spin" /> : <Play />}
             </span>
           </Hint>
           {act?.onOpenOutput && (
-            <Hint title={hasOutput ? '看这次跑出了什么' : '还没跑过，跑完才有输出'}>
+            <Hint title={hasOutput ? t('wf.outputHint') : t('wf.noOutputHint')}>
               <span
                 className={cn(HEADER_BTN, !hasOutput && 'opacity-45')}
                 onClick={() => act.onOpenOutput?.(id)}
@@ -503,13 +655,13 @@ const SwiftNodeView = memo(function SwiftNodeView({ id, data, selected }: NodePr
             </Hint>
           )}
           {act?.onAskAi && (
-            <Hint title="就这个节点问 AI">
+            <Hint title={t('wf.askAiHint')}>
               <span className={HEADER_BTN} onClick={() => act.onAskAi?.(id)}>
                 <Bot />
               </span>
             </Hint>
           )}
-          <Hint title="复制节点  ⌘D">
+          <Hint title={t('wf.duplicateHint')}>
             <span
               className={cn(HEADER_BTN, !selected && 'opacity-0 group-hover/act:opacity-100')}
               onClick={() => act?.onDuplicate(id)}
@@ -517,7 +669,7 @@ const SwiftNodeView = memo(function SwiftNodeView({ id, data, selected }: NodePr
               <Copy />
             </span>
           </Hint>
-          <Hint title="删除节点  Del">
+          <Hint title={t('wf.deleteHint')}>
             <span
               className={cn(HEADER_BTN, !selected && 'opacity-0 group-hover/act:opacity-100')}
               onClick={() => act?.onDelete(id)}
@@ -529,23 +681,34 @@ const SwiftNodeView = memo(function SwiftNodeView({ id, data, selected }: NodePr
       </div>
 
       {/*
-        端口区。左右两列各排一路，第 i 个输入和第 i 个输出自然对齐，
-        位置全靠布局撑出来——原来这里是按下标手算每个圆点的绝对坐标。
+        端口区。左右两列各排一路，数据口的第 i 个输入和第 i 个输出自然对齐；
+        翻了侧的顺序口会跨到另一列尾上——列内按口在类型里声明的顺序。
       */}
       <div className="grid min-h-5.5 grid-cols-2 gap-x-2 pt-1.5">
         <div className="flex flex-col gap-[7px]">
-          {def.inputs.map((p) => (
+          {leftPorts.map(({ p, dir }) => (
             <PortRow
               key={p.key}
               port={p}
-              dir="in"
-              highlight={linkType === p.type && linkFrom !== id}
+              dir={dir}
+              side="left"
+              highlight={linkType === p.type && linkFrom !== id && (linkDir === 'out') === (dir === 'in')}
+              roleHint={roleText(p.role, t)}
+              connectable={dir === 'out' ? !locked : true}
             />
           ))}
         </div>
         <div className="flex flex-col gap-[7px]">
-          {def.outputs.map((p) => (
-            <PortRow key={p.key} port={p} dir="out" connectable={!locked} />
+          {rightPorts.map(({ p, dir }) => (
+            <PortRow
+              key={p.key}
+              port={p}
+              dir={dir}
+              side="right"
+              highlight={linkType === p.type && linkFrom !== id && (linkDir === 'out') === (dir === 'in')}
+              roleHint={roleText(p.role, t)}
+              connectable={dir === 'out' ? !locked : true}
+            />
           ))}
         </div>
       </div>
@@ -575,33 +738,47 @@ const SwiftNodeView = memo(function SwiftNodeView({ id, data, selected }: NodePr
 function PortRow({
   port,
   dir,
+  side,
   highlight,
+  roleHint,
   connectable = true,
 }: {
   port: PortDef;
   dir: 'in' | 'out';
+  /** 口在哪一侧：翻转过的顺序口会跨到另一侧，Handle 跟着贴那条边 */
+  side: 'left' | 'right';
   /** 正在拉的线类型对得上，圆点放大并发光 */
   highlight?: boolean;
+  /** 口身份的中文说明：接线引导时亮出来，回答「这根线在算法里扮演什么」 */
+  roleHint?: string;
   connectable?: boolean;
 }) {
+  const { t } = useT();
   const color = PORT_TYPES[port.type].color;
   const size = highlight ? 14 : 12;
   return (
-    <div className={cn('relative flex h-3.5 items-center gap-1.5', dir === 'in' ? 'ps-2.5' : 'justify-end pe-2.5')}>
+    <div
+      className={cn(
+        'relative flex h-3.5 items-center gap-1.5',
+        side === 'left' ? 'ps-2.5' : 'justify-end pe-2.5',
+      )}
+    >
       <Handle
         id={port.key}
         type={dir === 'in' ? 'target' : 'source'}
-        position={dir === 'in' ? Position.Left : Position.Right}
+        position={side === 'left' ? Position.Left : Position.Right}
         isConnectableStart={connectable}
         title={
           dir === 'out'
             ? connectable
-              ? '从这里拖到下一个节点的输入口'
-              : '这路输出已锁定，不能单独引出'
-            : undefined
+              ? t('wf.dragOut')
+              : t('wf.lockedOut')
+            : roleHint
+              ? t('wf.portRole', { port: port.label, role: roleHint })
+              : t('wf.dragIn')
         }
         style={{
-          ...(dir === 'in' ? { left: -7 } : { right: -7 }),
+          ...(side === 'left' ? { left: -7 } : { right: -7 }),
           top: '50%',
           transform: 'translateY(-50%)',
           width: size,
@@ -618,6 +795,14 @@ function PortRow({
         }}
       />
       <span className="text-sidebar-foreground/60 text-[11px]">{port.label}</span>
+      {highlight && roleHint && (
+        <span
+          className="rounded-full px-1.5 py-px text-[10px] font-medium leading-tight text-white"
+          style={{ background: `${color}CC` }}
+        >
+          {roleHint}
+        </span>
+      )}
     </div>
   );
 }
@@ -643,6 +828,7 @@ function StatusDot({ status }: { status: GraphNode['status'] }) {
 
 function FrameNodeView({ data }: NodeProps) {
   const { frame } = data as FrameNodeData;
+  const { t } = useT();
   const c = frame.color ?? '#6366F1';
   return (
     <div
@@ -654,14 +840,14 @@ function FrameNodeView({ data }: NodeProps) {
           className="shrink-0 rounded-[7px] px-2.5 py-0.5 text-[11.5px] font-semibold tracking-wide text-white"
           style={{ background: c }}
         >
-          {frame.label}
+          {t(frame.label)}
         </span>
         {frame.note && (
           <span
             className="bg-titlebar text-sidebar-foreground/60 truncate rounded-[7px] border px-2 py-0.5 text-[11px]"
             style={{ borderColor: `${c}55` }}
           >
-            {frame.note}
+            {t(frame.note)}
           </span>
         )}
       </div>

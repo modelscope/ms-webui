@@ -22,6 +22,17 @@ export const trainTasks: TaskItem[] = [
     model: 'Qwen/Qwen3-8B',
     step: 640,
     totalSteps: 1500,
+    createCommand: [
+      'USE_SWIFT_V5=1 swift sft \\',
+      '    --model Qwen/Qwen3-8B \\',
+      '    --train_type lora \\',
+      '    --dataset AI-ModelScope/alpaca-gpt4-data-zh \\',
+      '    --learning_rate 1e-4 \\',
+      '    --num_train_epochs 3 \\',
+      '    --per_device_train_batch_size 4 \\',
+      '    --max_length 2048 \\',
+      '    --output_dir outputs/train-20260908-142310-a3f9',
+    ].join('\n'),
   },
   {
     id: 'train-20260908-101502-7b21',
@@ -34,6 +45,17 @@ export const trainTasks: TaskItem[] = [
     model: 'Qwen/Qwen3.5-4B',
     step: 820,
     totalSteps: 2000,
+    createCommand: [
+      'USE_SWIFT_V5=1 swift sft \\',
+      '    --model Qwen/Qwen3.5-4B \\',
+      '    --train_type full \\',
+      '    --dataset AI-ModelScope/alpaca-gpt4-data-en \\',
+      '    --learning_rate 1e-5 \\',
+      '    --num_train_epochs 2 \\',
+      '    --per_device_train_batch_size 2 \\',
+      '    --max_length 4096 \\',
+      '    --output_dir outputs/train-20260908-101502-7b21',
+    ].join('\n'),
   },
   {
     id: 'train-20260907-231044-c5e8',
@@ -45,6 +67,17 @@ export const trainTasks: TaskItem[] = [
     model: 'Qwen/Qwen3-8B',
     step: 3000,
     totalSteps: 3000,
+    createCommand: [
+      'USE_SWIFT_V5=1 swift rlhf \\',
+      '    --model Qwen/Qwen3-8B \\',
+      '    --rlhf_type dpo \\',
+      '    --dataset AI-ModelScope/ultrafeedback-binarized-preferences-cleaned-kto \\',
+      '    --mode ray \\',
+      '    --nproc_per_node 8 \\',
+      '    --learning_rate 5e-7 \\',
+      '    --num_train_epochs 1 \\',
+      '    --output_dir outputs/train-20260907-231044-c5e8',
+    ].join('\n'),
   },
   {
     id: 'train-20260907-183355-91da',
@@ -57,6 +90,17 @@ export const trainTasks: TaskItem[] = [
     step: 12,
     totalSteps: 900,
     error: 'CUDA out of memory (exit_code=1)',
+    createCommand: [
+      'USE_SWIFT_V5=1 swift sft \\',
+      '    --model Qwen/Qwen2-VL-7B-Instruct \\',
+      '    --train_type lora \\',
+      '    --dataset AI-ModelScope/multi-modal-LlamaFactory \\',
+      '    --learning_rate 1e-4 \\',
+      '    --num_train_epochs 1 \\',
+      '    --per_device_train_batch_size 8 \\',
+      '    --max_length 4096 \\',
+      '    --output_dir outputs/train-20260907-183355-91da',
+    ].join('\n'),
   },
   {
     id: 'train-20260906-090012-2f70',
@@ -68,6 +112,15 @@ export const trainTasks: TaskItem[] = [
     model: 'Qwen/Qwen3-0.6B',
     step: 500,
     totalSteps: 500,
+    createCommand: [
+      'USE_SWIFT_V5=1 swift sft \\',
+      '    --model Qwen/Qwen3-0.6B \\',
+      '    --train_type full \\',
+      '    --dataset AI-ModelScope/embedding-distill-sample \\',
+      '    --learning_rate 3e-5 \\',
+      '    --num_train_epochs 2 \\',
+      '    --output_dir outputs/train-20260906-090012-2f70',
+    ].join('\n'),
   },
 ];
 
@@ -80,6 +133,13 @@ export const evalTasks: TaskItem[] = [
     createdAt: '2026-09-08 15:02:20',
     runner: 'local',
     model: 'train-20260907-231044-c5e8 / checkpoint-3000',
+    createCommand: [
+      'USE_SWIFT_V5=1 swift infer \\',
+      '    --model outputs/train-20260907-231044-c5e8/checkpoint-3000 \\',
+      '    --dataset AI-ModelScope/ceval-exam AI-ModelScope/cmmlu \\',
+      '    --infer_backend vllm \\',
+      '    --output_format all',
+    ].join('\n'),
   },
   {
     id: 'eval-20260907-234510-4d33',
@@ -89,6 +149,13 @@ export const evalTasks: TaskItem[] = [
     createdAt: '2026-09-07 23:45:10',
     runner: 'local',
     model: 'Qwen/Qwen3-8B',
+    createCommand: [
+      'USE_SWIFT_V5=1 swift infer \\',
+      '    --model Qwen/Qwen3-8B \\',
+      '    --dataset AI-ModelScope/ceval-exam \\',
+      '    --infer_backend vllm \\',
+      '    --output_format all',
+    ].join('\n'),
   },
   {
     id: 'eval-20260907-120033-ee02',
@@ -99,6 +166,13 @@ export const evalTasks: TaskItem[] = [
     runner: 'local',
     model: 'train-20260906-090012-2f70 / checkpoint-500',
     error: 'evalscope 未安装（exit_code=127）',
+    createCommand: [
+      'USE_SWIFT_V5=1 swift infer \\',
+      '    --model outputs/train-20260906-090012-2f70/checkpoint-500 \\',
+      '    --dataset AI-ModelScope/gsm8k \\',
+      '    --infer_backend vllm \\',
+      '    --orm accuracy',
+    ].join('\n'),
   },
 ];
 
@@ -111,6 +185,13 @@ export const exportTasks: TaskItem[] = [
     createdAt: '2026-09-08 11:30:00',
     runner: 'local',
     model: 'train-20260907-231044-c5e8 / checkpoint-3000',
+    createCommand: [
+      'USE_SWIFT_V5=1 swift export \\',
+      '    --model outputs/train-20260907-231044-c5e8/checkpoint-3000 \\',
+      '    --merge_lora true \\',
+      '    --quant_method awq \\',
+      '    --quant_bits 4',
+    ].join('\n'),
   },
   {
     id: 'export-20260908-093011-d7f4',
@@ -120,6 +201,12 @@ export const exportTasks: TaskItem[] = [
     createdAt: '2026-09-08 09:30:11',
     runner: 'local',
     model: 'merged-qwen3-8b-dpo',
+    createCommand: [
+      'USE_SWIFT_V5=1 swift export \\',
+      '    --model merged-qwen3-8b-dpo \\',
+      '    --push_to_hub true \\',
+      '    --hub_model_id qwen3-8b-dpo-aligned',
+    ].join('\n'),
   },
 ];
 

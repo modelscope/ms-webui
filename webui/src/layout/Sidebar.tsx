@@ -1,16 +1,22 @@
 import { useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import {
+import { Boxes,
   Bell,
+  Check,
   ChevronDown,
   CircleHelp,
+  FlaskConical,
+  Globe,
+  KeyRound,
   MessageSquare,
   Network,
   Package,
+  Plug,
   Plus,
   Rocket,
   Search,
+  SquareTerminal,
   Workflow,
   Zap,
 } from 'lucide-react';
@@ -24,9 +30,11 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { ModuleKey } from '@/theme/modules';
-import { MODULES, MODULE_ORDER, moduleOf, taskDetailPath } from '@/theme/modules';
+import { MODULES, MODULE_ORDER, moduleOf } from '@/theme/modules';
 import { features } from '@/config/features';
-import { tasksByType } from '@/mock/data';
+import { useSettings } from '@/settings/SettingsContext';
+import { useRecent } from '@/store/recent';
+import { LOCALES, useT, type MessageKey } from '@/i18n';
 import { ChromeIconButton } from './ChromeIconButton';
 
 const ICONS: Record<ModuleKey, ReactNode> = {
@@ -36,14 +44,17 @@ const ICONS: Record<ModuleKey, ReactNode> = {
   export: <Package size={14} />,
   deploy: <Rocket size={14} />,
   workflow: <Workflow size={14} />,
+  research: <FlaskConical size={14} />,
+  scripts: <SquareTerminal size={14} />,
+  plugins: <Plug size={14} />,
+  models: <Boxes size={14} />,
 };
 
 /**
- * 深色侧栏里弹出的菜单，配色改成跟侧栏同一套。
+ * 侧栏里弹出的菜单，配色跟侧栏同一套。
  *
- * shadcn 的 DropdownMenuContent 默认是 bg-popover——那是内容区那套浅色语义，
- * 从一块近黑的侧栏里弹出一张白卡片会很割裂。这里换成 sidebar-* 那组，
- * 菜单看起来就像从侧栏本身撑开的，跟 VS Code 一致。
+ * 不用 shadcn 默认的 bg-popover（那是内容区/浮层的语义，比侧栏更亮），
+ * 菜单用 sidebar-* 那组看起来就像从侧栏本身撑开的，跟 VS Code 一致。
  */
 const MENU_CLS = 'bg-sidebar border-sidebar-border text-sidebar-foreground min-w-[168px]';
 const MENU_ITEM_CLS =
@@ -58,30 +69,78 @@ function SectionLabel({ children }: { children: ReactNode }) {
   );
 }
 
+/* 模块级 helper 不能用 hook：t 从调用方传进来（只收用到的签名子集） */
+type TFn = (key: MessageKey) => string;
+
+/**
+ * 底部的 ModelScope 令牌状态行：图标 + 「MS Token · 已配置/未配置」，
+ * 点击去设置页配置（PAT 是 research 对话默认模型与 tinker 服务的凭据）。
+ * 折叠时只剩图标，悬停 tooltip 出全名。
+ */
+function tokenRow(
+  collapsed: boolean,
+  configured: boolean,
+  onOpen: () => void,
+  t: TFn,
+) {
+  const label = t('sidebar.msToken');
+  const state = configured ? t('sidebar.msTokenOn') : t('sidebar.msTokenOff');
+  const full = `${label} · ${state}`;
+  const row = (
+    <button
+      type="button"
+      onClick={onOpen}
+      data-tour="ms-token"
+      title={full}
+      className={cn(
+        'flex h-[34px] w-full cursor-pointer items-center gap-2 rounded-md outline-none',
+        collapsed ? 'justify-center px-0' : 'justify-start px-[11px]',
+        'text-sidebar-foreground/60 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground',
+      )}
+    >
+      <KeyRound size={14} className="shrink-0" />
+      {!collapsed && (
+        <span className="truncate text-[13px]" title={full}>
+          {label}
+          <span className={cn('ml-1.5 text-[11px]', configured ? 'text-primary' : 'text-sidebar-foreground/40')}>
+            {state}
+          </span>
+        </span>
+      )}
+    </button>
+  );
+  return collapsed ? (
+    <Tooltip>
+      <TooltipTrigger asChild>{row}</TooltipTrigger>
+      <TooltipContent side="right">{full}</TooltipContent>
+    </Tooltip>
+  ) : (
+    row
+  );
+}
+
 /**
  * 左侧导航。信息设计参考 Codex：小字号、紧凑行高、细图标，
  * 选中态只是一块低对比底色——导航里不出现品牌色，让内容区去承担强调。
  * 操作按钮走「非线性」：贴边的无框幽灵按钮，而非并排的按钮组。
  */
 export function Sidebar({ collapsed }: { collapsed: boolean }) {
-  const { pathname } = useLocation();
+  /* search 一起取：最近项的 path 带 ?conv= 这类参数，只比 pathname 会全部失配 */
+  const { pathname, search } = useLocation();
   const navigate = useNavigate();
   const current = moduleOf(pathname);
+  const { t, locale, setLocale } = useT();
 
   const items = useMemo(
     () => MODULE_ORDER.filter((k) => features.modules.includes(k)).map((k) => MODULES[k]),
     [],
   );
 
-  /** 「最近」分组：跨模块取最新几条，给侧栏一点活气 */
-  const recent = useMemo(
-    () =>
-      Object.values(tasksByType)
-        .flat()
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .slice(0, 5),
-    [],
-  );
+  /** 「最近」分组：用户真实发生过的操作（新对话、新部署…），见 store/recent.ts */
+  const recent = useRecent();
+
+  /* 令牌状态（PAT 存全局设置；点击行进设置页配置） */
+  const { settings } = useSettings();
 
   /* 导航行的公共形状。选中/未选中只差一层底色和字重 */
   const row = (active: boolean, extra?: string) =>
@@ -107,7 +166,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         )}
       >
         {collapsed ? (
-          <span className="text-sidebar-foreground text-sm font-bold">S</span>
+          <span className="text-sidebar-foreground text-sm font-bold">M</span>
         ) : (
           <>
             <DropdownMenu>
@@ -116,27 +175,49 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
                   type="button"
                   className="text-sidebar-foreground hover:text-sidebar-foreground/80 inline-flex cursor-pointer items-center gap-1.5 text-[15px] font-semibold tracking-wide outline-none"
                 >
-                  SWIFT
+                  MS-WebUI
                   <ChevronDown size={10} className="text-sidebar-foreground/40" />
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className={MENU_CLS}>
-                <DropdownMenuItem className={MENU_ITEM_CLS}>关于 SWIFT WebUI</DropdownMenuItem>
+                <DropdownMenuItem className={MENU_ITEM_CLS}>{t('sidebar.about')}</DropdownMenuItem>
                 <DropdownMenuItem className={MENU_ITEM_CLS} onClick={() => navigate('/settings')}>
-                  偏好设置
+                  {t('sidebar.preferences')}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator className="bg-sidebar-border" />
                 <DropdownMenuItem className={MENU_ITEM_CLS} asChild>
                   <a href="https://swift.readthedocs.io" target="_blank" rel="noreferrer">
-                    文档
+                    {t('common.docs')}
                   </a>
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
 
+            {/* 语言切换（品牌菜单右侧）：当前语种短码 + 下拉；语言名恒用自身语言书写 */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  title={t('lang.switch')}
+                  className="text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/60 inline-flex cursor-pointer items-center gap-1 rounded px-1.5 py-1 outline-none"
+                >
+                  <Globe size={13} />
+                  <span className="text-[11px] font-medium">{LOCALES.find((l) => l.value === locale)?.short}</span>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className={MENU_CLS}>
+                {LOCALES.map((l) => (
+                  <DropdownMenuItem key={l.value} className={MENU_ITEM_CLS} onClick={() => setLocale(l.value)}>
+                    {l.label}
+                    {locale === l.value && <Check size={12} className="ms-auto" />}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             <div className="ms-auto flex gap-0.5">
-              <ChromeIconButton icon={<Search size={13} />} label="搜索  ⌘K" />
-              <ChromeIconButton icon={<Bell size={13} />} label="通知" />
+              <ChromeIconButton icon={<Search size={13} />} label={t('sidebar.searchHint')} />
+              <ChromeIconButton icon={<Bell size={13} />} label={t('sidebar.notifications')} />
             </div>
           </>
         )}
@@ -149,6 +230,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
           const link = (
             <Link
               to={m.path}
+              data-tour={m.key}
               className={row(
                 active,
                 /* 对话行右侧留出脱离行外的 + 按钮位置 */
@@ -156,12 +238,12 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
               )}
             >
               <span className="inline-flex text-current opacity-90">{ICONS[m.key]}</span>
-              {!collapsed && m.label}
+              {!collapsed && t(m.label)}
               {!collapsed && m.key === 'chat' && (
                 <span className="ms-auto">
                   <ChromeIconButton
                     icon={<Plus size={13} />}
-                    label="新建对话"
+                    label={t('common.newChat')}
                     size={24}
                     onClick={() => navigate('/chat')}
                   />
@@ -172,62 +254,49 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
           return collapsed ? (
             <Tooltip key={m.key}>
               <TooltipTrigger asChild>{link}</TooltipTrigger>
-              <TooltipContent side="right">{m.label}</TooltipContent>
+              <TooltipContent side="right">{t(m.label)}</TooltipContent>
             </Tooltip>
           ) : (
             <div key={m.key}>{link}</div>
           );
         })}
 
-        {/* 最近：跨模块的近期任务 */}
-        {!collapsed && (
+        {/* 最近：用户真实操作过的对象（对话、部署……），来自 store/recent.ts */}
+        {!collapsed && recent.length > 0 && (
           <>
-            <SectionLabel>最近</SectionLabel>
-            {recent.map((t) => (
-              <Link key={t.id} to={taskDetailPath(t)} className={row(pathname.includes(t.id), 'h-[30px]')}>
-                <span className="truncate">{t.label}</span>
+            <SectionLabel>{t('common.recent')}</SectionLabel>
+            {recent.map((item) => (
+              <Link
+                key={item.id}
+                to={item.path}
+                title={item.label}
+                className={row(
+                  /* here 与 item.path 同构（pathname + ?query），对话项才能对上号 */
+                  pathname + search === item.path || (pathname + search).startsWith(`${item.path}/`),
+                  'h-[30px]',
+                )}
+              >
+                <span className="truncate">{item.label}</span>
               </Link>
             ))}
           </>
         )}
       </div>
 
-      {/* 底部：空间切换 + 用户，右侧贴边帮助 */}
+      {/*
+       * 底部：ModelScope 令牌状态行（点击去设置页；展览模式令牌只在本
+       * 浏览器会话内存，本地模式存本机设置文件）；帮助按钮恒在，独立成行。
+       */}
       <div className="border-sidebar-border shrink-0 border-t p-2">
-        {features.multiTenant && !collapsed && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button type="button" className={cn(row(false), 'w-full cursor-pointer outline-none')}>
-                <span className="text-sidebar-foreground/40">空间</span>
-                <span className="text-sidebar-foreground">default</span>
-                <ChevronDown size={10} className="text-sidebar-foreground/40 ms-auto" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" side="top" className={MENU_CLS}>
-              <DropdownMenuItem className={MENU_ITEM_CLS}>default（默认空间）</DropdownMenuItem>
-              <DropdownMenuItem className={MENU_ITEM_CLS}>team-a</DropdownMenuItem>
-              <DropdownMenuItem className={MENU_ITEM_CLS}>team-b</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
+        {tokenRow(collapsed, Boolean(settings.msToken), () => navigate('/settings'), t)}
 
         <div
           className={cn(
-            'flex h-[34px] items-center gap-2',
-            collapsed ? 'justify-center px-0' : 'justify-start px-[11px]',
+            'flex h-[34px] items-center',
+            collapsed ? 'justify-center px-0' : 'justify-end px-[11px]',
           )}
         >
-          <div className="bg-sidebar-accent text-sidebar-foreground flex size-[22px] shrink-0 items-center justify-center rounded-full text-[11px] font-semibold">
-            U
-          </div>
-          {!collapsed && (
-            <>
-              <span className="text-sidebar-foreground/60 truncate text-[13px]">user@swift</span>
-              <span className="ms-auto">
-                <ChromeIconButton icon={<CircleHelp size={13} />} label="帮助" side="top" />
-              </span>
-            </>
-          )}
+          <ChromeIconButton icon={<CircleHelp size={13} />} label={t('common.help')} side="top" />
         </div>
       </div>
     </div>

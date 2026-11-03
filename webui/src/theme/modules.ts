@@ -1,3 +1,5 @@
+import type { MessageKey } from '@/i18n';
+
 /**
  * 模块注册表：全站唯一的「有哪些功能模块 / 挂在哪个路由」的定义源。
  *
@@ -7,59 +9,83 @@
  * 这里不再有强调色：整站单一强调色，模块不各用一色（学 unsloth 的做法），
  * 于是那个色值就是 --primary 本身，写在 CSS 变量里，不需要每个模块各存一份。
  */
-export type ModuleKey = 'chat' | 'train' | 'eval' | 'export' | 'deploy' | 'workflow';
+export type ModuleKey = 'chat' | 'train' | 'eval' | 'export' | 'deploy' | 'workflow' | 'research' | 'scripts' | 'plugins' | 'models';
 
 export interface ModuleMeta {
   key: ModuleKey;
-  /** 侧边栏与标题上的显示名 */
-  label: string;
+  /** 侧边栏与标题上的显示名（i18n key，消费方用 t() 渲染） */
+  label: MessageKey;
   /** 路由前缀，如 /train */
   path: string;
-  /** 一句话说明，显示在页头 */
-  desc: string;
+  /** 一句话说明，显示在页头（i18n key） */
+  desc: MessageKey;
 }
 
 export const MODULES: Record<ModuleKey, ModuleMeta> = {
   chat: {
     key: 'chat',
-    label: '对话',
+    label: 'nav.chat',
     path: '/chat',
-    desc: '与本地或远端模型对话，可多模型并排对比',
+    desc: 'nav.chat.desc',
   },
   train: {
     key: 'train',
-    label: '训练',
+    label: 'nav.train',
     path: '/train',
-    desc: '发起训练任务，实时查看指标曲线与日志',
+    desc: 'nav.train.desc',
   },
   eval: {
     key: 'eval',
-    label: '评测',
+    label: 'nav.eval',
     path: '/eval',
-    desc: '对 checkpoint 跑评测，支持多结果对比',
+    desc: 'nav.eval.desc',
   },
   export: {
     key: 'export',
-    label: '导出',
+    label: 'nav.export',
     path: '/export',
-    desc: 'LoRA 合并、量化、推送到 Hub',
+    desc: 'nav.export.desc',
   },
   deploy: {
     key: 'deploy',
-    label: '部署',
+    label: 'nav.deploy',
     path: '/deploy',
-    desc: '把模型拉起成常驻推理服务',
+    desc: 'nav.deploy.desc',
   },
   workflow: {
     key: 'workflow',
-    label: '编排',
+    label: 'nav.workflow',
     path: '/workflow',
-    desc: '把训练、评测、合并、部署串成一条流程',
+    desc: 'nav.workflow.desc',
+  },
+  research: {
+    key: 'research',
+    label: 'nav.research',
+    path: '/research',
+    desc: 'nav.research.desc',
+  },
+  scripts: {
+    key: 'scripts',
+    label: 'nav.scripts',
+    path: '/scripts',
+    desc: 'nav.scripts.desc',
+  },
+  plugins: {
+    key: 'plugins',
+    label: 'nav.plugins',
+    path: '/plugins',
+    desc: 'nav.plugins.desc',
+  },
+  models: {
+    key: 'models',
+    label: 'nav.models',
+    path: '/models',
+    desc: 'nav.models.desc',
   },
 };
 
 /** 侧边导航顺序 */
-export const MODULE_ORDER: ModuleKey[] = ['chat', 'train', 'eval', 'export', 'deploy', 'workflow'];
+export const MODULE_ORDER: ModuleKey[] = ['chat', 'train', 'eval', 'export', 'deploy', 'workflow', 'research', 'scripts', 'plugins', 'models'];
 
 /** 根据当前 pathname 反查所属模块，找不到时回落到 chat */
 export function moduleOf(pathname: string): ModuleMeta {
@@ -77,5 +103,9 @@ export function moduleOf(pathname: string): ModuleMeta {
  */
 export function taskDetailPath(task: { type: ModuleKey; id: string }): string {
   if (task.type === 'workflow') return `/workflow/${task.id}/edit`;
+  /* 脚本只有日志一个 Tab，详情直达 log（与 deploy 直达 overview 同一模式） */
+  if (task.type === 'scripts') return `/scripts/${task.id}/log`;
+  /* 研究详情默认看迭代账本（事件流是第二 Tab） */
+  if (task.type === 'research') return `/research/${task.id}/iterations`;
   return `${MODULES[task.type].path}/${task.id}`;
 }

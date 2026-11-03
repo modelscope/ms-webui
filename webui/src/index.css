@@ -75,27 +75,28 @@
   --ring: #4063a1;
 
   /**
-   * 深浅混搭：外壳（标题栏 + 侧栏）常深，工作区常浅，所以浅色模式下侧栏也是深的。
-   * 深色不用中性黑，而是把 logo 的紫端压暗，让外壳和鸟身同一个色系；
-   * 暖米纸的内容区被冷紫外壳夹住，纸感反而更强。
+   * 外壳（标题栏 + 侧栏）与内容区同轴浅色：侧栏用纸染深一档的 muted，
+   * 靠 border 与内容区分隔；激活项用主色馶蓝底，hover 用 accent。
+   * 全部复用内容区既有色值，外壳与工作区不再深浅割裂。
    */
-  --sidebar: #1e1b2e;
-  --sidebar-foreground: #ece9f2;
-  /* 激活项的高亮色，用 logo 蓝提亮到深底上能读的程度 */
-  --sidebar-primary: #b7c0e6;
-  --sidebar-primary-foreground: #1e1b2e;
-  --sidebar-accent: #2b2740;
-  --sidebar-accent-foreground: #f4f2f8;
-  --sidebar-border: #322d47;
-  --sidebar-ring: #6b78ad;
-  /* 标题栏比侧栏再深一档，让窗口有层次 */
+  --sidebar: #f0ebe4;
+  --sidebar-foreground: #2b2438;
+  /* 激活项高亮：主色馶蓝底配纸色字（同 primary 的 8.4:1） */
+  --sidebar-primary: #3e4773;
+  --sidebar-primary-foreground: #f8f5f0;
+  --sidebar-accent: #ddd6ea;
+  --sidebar-accent-foreground: #35305c;
+  --sidebar-border: #e0d6c9;
+  --sidebar-ring: #4063a1;
+  /* 画布深底：workflow 编排页的画布与代码块仍用深底（彩端口线在深底上
+   * 才醒目），外壳改浅后这个色只剩画布消费，名字保留不改调用面 */
   --titlebar: #181527;
   /**
-   * tips 条的暖色点缀。刻意不复用 --chart-*：chart 那一组是按浅色纸调的，
-   * 放到深色外壳上对比度不够。这个金色是按 #181527 底选的，深浅模式同值——
-   * 也是整套界面里唯一一处暖色强调，压在冷紫上正好把提示条拎出来。
+   * tips 条的暖色点缀。浅色模式按纸色底选深金，深色模式在 .dark 块里
+   * 换回亮金——两套各自保证对比度。也是整套界面里唯一一处暖色强调，
+   * 压在冷紫轴上正好把提示条拎出来。
    */
-  --titlebar-accent: #d9a825;
+  --titlebar-accent: #8a6a1c;
 
   /**
    * 五条曲线全部落在 logo 的蓝紫轴上，靠明度和冷暖两头扩散来拉开区分度：
@@ -215,6 +216,8 @@
   --sidebar-accent-foreground: #f4f2f8;
   --sidebar-border: #322d47;
   --sidebar-ring: #6b78ad;
+  /* 深色模式外壳保持深；tips 金换回亮金（按深底选） */
+  --titlebar-accent: #d9a825;
   --titlebar: #131020;
 
   /* 同一条蓝紫轴，但把亮度整体提上来，否则深色底上五条线糊成一团 */

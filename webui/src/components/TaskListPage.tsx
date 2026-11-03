@@ -4,11 +4,14 @@ import type { ReactNode } from 'react';
 import {
   CloudCog,
   FileText,
+  FlaskConical,
+  GitCompareArrows,
   LineChart,
   MoreHorizontal,
   Network,
   Package,
   Pause,
+  Bot,
   Play,
   Plus,
   RotateCw,
@@ -43,8 +46,10 @@ import {
 } from '@/components/ui/alert-dialog';
 import { PageHeader } from './PageHeader';
 import { StatusTag } from './StatusTag';
+import { useT, type MessageKey } from '@/i18n';
 import { CopyText } from './CopyText';
 import { Column } from './Column';
+import { RenameDialog, type RenameTarget } from './RenameDialog';
 import type { ModuleKey, ModuleMeta } from '@/theme/modules';
 import { taskDetailPath } from '@/theme/modules';
 import { features } from '@/config/features';
@@ -54,22 +59,34 @@ import type { TaskItem, TaskStatus } from '@/mock/types';
 export interface TaskListOptions {
   /** train：显示 step 进度 */
   showProgress?: boolean;
+  /** train：行首 checkbox 多选，选中≥2 时头部出「对比选中」按钮（实验对比页入口） */
+  showCompare?: boolean;
   /** deploy：显示 endpoint */
   showEndpoint?: boolean;
   /** train：显示指标入口 */
   showMetrics?: boolean;
-  /** 「新建」按钮文案 */
-  createText: string;
+  /** 「新建」按钮文案；不传则不渲染新建按钮（如脚本任务由 agent 创建，没有新建页） */
+  createText?: string;
   /** 「模型 / 来源」的语义标签，各模块不同 */
   sourceLabel: string;
+  /** 接了后端的模块传刷新回调（手动立即拉一帧）；不传则保持示意 toast */
+  onRefresh?: () => Promise<void>;
+  /** 接了后端的模块传重命名回调；不传则菜单项保持示意 toast */
+  onRename?: (id: string, name: string) => Promise<void>;
+  /** 接了后端的模块传停止回调；不传则保持示意 toast */
+  onStop?: (id: string) => Promise<void>;
+  /** 重跑回调（同参数再执行一次，如脚本任务）；不传不显示重跑按钮 */
+  onRerun?: (id: string) => Promise<void>;
+  /** 停止确认弹窗的说明文案；不传用默认的 SIGTERM 文案（模块间停止语义不同） */
+  stopDesc?: string;
 }
 
-const STATUS_FILTERS: Array<{ label: string; value: TaskStatus | 'ALL' }> = [
-  { label: '全部', value: 'ALL' },
-  { label: '运行中', value: 'RUNNING' },
-  { label: '已完成', value: 'DONE' },
-  { label: '失败', value: 'FAILED' },
-  { label: '已暂停', value: 'PAUSED' },
+const STATUS_FILTERS: Array<{ label: MessageKey; value: TaskStatus | 'ALL' }> = [
+  { label: 'task.all', value: 'ALL' },
+  { label: 'task.running', value: 'RUNNING' },
+  { label: 'task.done', value: 'DONE' },
+  { label: 'task.failed', value: 'FAILED' },
+  { label: 'task.paused', value: 'PAUSED' },
 ];
 
 const MODULE_ICON: Partial<Record<ModuleKey, ReactNode>> = {
@@ -78,6 +95,7 @@ const MODULE_ICON: Partial<Record<ModuleKey, ReactNode>> = {
   export: <Package size={16} />,
   deploy: <Rocket size={16} />,
   workflow: <Workflow size={16} />,
+  research: <FlaskConical size={16} />,
 };
 
 /** 次要信息之间的分隔点 */
@@ -122,14 +140,24 @@ export function TaskListPage({
   module,
   tasks,
   options,
+  onAssistant,
 }: {
   module: ModuleMeta;
   tasks: TaskItem[];
   options: TaskListOptions;
+  /** 页面 AI 助手入口（打开各页挂的 PageAssistant）；不传不显示按钮 */
+  onAssistant?: () => void;
 }) {
   const navigate = useNavigate();
+  const { t: tr } = useT();
+  /* 行操作 map 的循环变量 t 是任务项：toast 插值在此预绑，避免遮蔽冲突 */
+  const rerunToast = (label: string) => toast.success(tr('task.rerunToast', { label }));
+  const stopToast = (label: string) => toast.success(tr('task.stopToast', { label }));
   const [keyword, setKeyword] = useState('');
   const [status, setStatus] = useState<TaskStatus | 'ALL'>('ALL');
+  const [renaming, setRenaming] = useState<RenameTarget | null>(null);
+  /* 对比多选（仅 showCompare 开关时出现）：选中 id 集合，与筛选器独立 */
+  const [compareIds, setCompareIds] = useState<string[]>([]);
 
   const filtered = useMemo(
     () =>
@@ -153,28 +181,65 @@ export function TaskListPage({
     <>
       <PageHeader
         module={module}
-        title={module.label}
-        desc={module.desc}
+        title={tr(module.label)}
+        desc={tr(module.desc)}
         extra={
           <>
+            {onAssistant && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={tr('task.aiAssistant')}
+                    className="text-muted-foreground"
+                    onClick={onAssistant}
+                  >
+                    <Bot />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{tr('task.aiAssistant')}</TooltipContent>
+              </Tooltip>
+            )}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   variant="ghost"
                   size="icon"
-                  aria-label="刷新"
+                  aria-label={tr('task.refresh')}
                   className="text-muted-foreground"
-                  onClick={() => toast.success('已刷新（示意）')}
+                  onClick={() => {
+                    if (options.onRefresh) {
+                      void options
+                        .onRefresh()
+                        .then(() => toast.success(tr('task.refreshed')))
+                        .catch((e) => toast.error(String(e)));
+                    } else {
+                      toast.success(tr('task.refreshedDemo'));
+                    }
+                  }}
                 >
                   <RotateCw />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>刷新</TooltipContent>
+              <TooltipContent>{tr('task.refresh')}</TooltipContent>
             </Tooltip>
-            <Button onClick={() => navigate(`${module.path}/new`)}>
-              <Plus />
-              {options.createText}
-            </Button>
+            {options.showCompare && compareIds.length >= 2 && (
+              <Button
+                variant="outline"
+                className="h-9 gap-1.5"
+                onClick={() => navigate(`${module.path}/compare?ids=${compareIds.join(',')}`)}
+              >
+                <GitCompareArrows size={15} />
+                {tr('task.compareSelected', { n: compareIds.length })}
+              </Button>
+            )}
+            {options.createText && (
+              <Button onClick={() => navigate(`${module.path}/new`)}>
+                <Plus />
+                {options.createText}
+              </Button>
+            )}
           </>
         }
       />
@@ -187,7 +252,7 @@ export function TaskListPage({
             className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 -translate-y-1/2"
           />
           <Input
-            placeholder={`搜索名称、id、${options.sourceLabel}`}
+            placeholder={tr('task.searchPlaceholder', { source: options.sourceLabel })}
             className="h-10 ps-9"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
@@ -211,7 +276,7 @@ export function TaskListPage({
                     : 'text-muted-foreground hover:text-foreground hover:bg-secondary/60 inline-flex h-7 cursor-pointer items-center gap-1.5 px-2.5 text-[13px]'
                 }
               >
-                {f.label}
+                {tr(f.label)}
                 <span className="text-muted-foreground tabular text-xs">{count}</span>
               </button>
             );
@@ -221,7 +286,7 @@ export function TaskListPage({
         {/* 列表：无边框、无卡片，靠留白分行 */}
         {filtered.length === 0 ? (
           <div className="text-muted-foreground border-border mt-2 border border-dashed py-18 text-center text-sm">
-            {tasks.length === 0 ? '还没有任务' : '没有匹配的任务'}
+            {tasks.length === 0 ? tr('task.empty') : tr('task.emptyFiltered')}
           </div>
         ) : (
           <div className="flex flex-col">
@@ -231,6 +296,21 @@ export function TaskListPage({
                 className="task-row hover:bg-secondary/50 -mx-3 flex cursor-pointer items-start gap-3.5 px-3 py-3.5 transition-colors"
                 onClick={() => navigate(taskDetailPath(t))}
               >
+                {/* 对比多选 checkbox（仅 showCompare 开启）：点击不触发行跳转 */}
+                {options.showCompare && (
+                  <input
+                    type="checkbox"
+                    className="border-border accent-primary mt-1 size-3.5 flex-none cursor-pointer"
+                    checked={compareIds.includes(t.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() =>
+                      setCompareIds((prev) =>
+                        prev.includes(t.id) ? prev.filter((x) => x !== t.id) : [...prev, t.id],
+                      )
+                    }
+                  />
+                )}
+
                 {/* 裸图标，不套底色方块 */}
                 <span className="text-muted-foreground mt-0.5 flex-none">
                   {MODULE_ICON[module.key] ?? <Workflow size={16} />}
@@ -261,7 +341,7 @@ export function TaskListPage({
                             </span>
                           </TooltipTrigger>
                           <TooltipContent>
-                            训练循环在本地，算子下沉到 {t.serverUrl}
+                            {tr('task.loopLocal', { url: t.serverUrl })}
                           </TooltipContent>
                         </Tooltip>
                       </>
@@ -283,10 +363,10 @@ export function TaskListPage({
                         ) : (
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <span className="cursor-default">端口分配中…</span>
+                              <span className="cursor-default">{tr('task.portAssigning')}</span>
                             </TooltipTrigger>
                             <TooltipContent>
-                              进程启动后自选端口并写回 runtime.json，此处等它出现
+                              {tr('task.portHint')}
                             </TooltipContent>
                           </Tooltip>
                         )}
@@ -301,27 +381,39 @@ export function TaskListPage({
                   {options.showMetrics && (
                     <RowAction
                       icon={<LineChart />}
-                      label="指标曲线"
+                      label={tr('task.metrics')}
                       onClick={() => navigate(`${module.path}/${t.id}/metrics`)}
                     />
                   )}
                   <RowAction
                     icon={<FileText />}
-                    label="日志"
+                    label={tr('task.logs')}
                     onClick={() => navigate(taskDetailPath(t))}
                   />
+                  {options.onRerun && (
+                    <RowAction
+                      icon={<RotateCw />}
+                      label={tr('task.rerun')}
+                      onClick={() => {
+                        void options
+                          .onRerun!(t.id)
+                          .then(() => rerunToast(t.label))
+                          .catch((e) => toast.error(String(e)));
+                      }}
+                    />
+                  )}
                   {t.status === 'RUNNING' && canPause(t) && (
                     <RowAction
                       icon={<Pause />}
-                      label="暂停后服务端仍保留训练状态，显存不释放"
-                      onClick={() => toast.info('暂停（示意，未接后端）')}
+                      label={tr('task.pauseHint')}
+                      onClick={() => toast.info(tr('task.pauseDemo'))}
                     />
                   )}
                   {t.status === 'PAUSED' && (
                     <RowAction
                       icon={<Play />}
-                      label="用同一个 adapter_name 起新客户端，无损续跑"
-                      onClick={() => toast.info('继续（示意，未接后端）')}
+                      label={tr('task.resumeHint')}
+                      onClick={() => toast.info(tr('task.resumeDemo'))}
                     />
                   )}
                   {t.status === 'RUNNING' && (
@@ -332,7 +424,7 @@ export function TaskListPage({
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          aria-label="停止"
+                          aria-label={tr('task.stop')}
                           className="text-state-failed hover:text-state-failed"
                         >
                           <Square />
@@ -340,15 +432,27 @@ export function TaskListPage({
                       </AlertDialogTrigger>
                       <AlertDialogContent>
                         <AlertDialogHeader>
-                          <AlertDialogTitle>停止「{t.label}」？</AlertDialogTitle>
+                          <AlertDialogTitle>{tr('task.stopConfirm', { label: t.label })}</AlertDialogTitle>
                           <AlertDialogDescription>
-                            先发 SIGTERM 让它有机会保存 checkpoint，超时未退再 SIGKILL。
+                            {options.stopDesc ??
+                              tr('task.stopHint')}
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
-                          <AlertDialogCancel>取消</AlertDialogCancel>
-                          <AlertDialogAction onClick={() => toast.info('停止（示意，未接后端）')}>
-                            停止
+                          <AlertDialogCancel>{tr('common.cancel')}</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => {
+                              if (options.onStop) {
+                                void options
+                                  .onStop(t.id)
+                                  .then(() => stopToast(t.label))
+                                  .catch((e) => toast.error(String(e)));
+                              } else {
+                                toast.info(tr('task.stopDemo'));
+                              }
+                            }}
+                          >
+                            {tr('task.stop')}
                           </AlertDialogAction>
                         </AlertDialogFooter>
                       </AlertDialogContent>
@@ -359,26 +463,38 @@ export function TaskListPage({
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        aria-label="更多"
+                        aria-label={tr('task.more')}
                         className="text-muted-foreground"
                       >
                         <MoreHorizontal />
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                      <DropdownMenuItem onClick={() => toast.info('示意，未接后端')}>
-                        重命名
+                      <DropdownMenuItem
+                        onClick={() =>
+                          options.onRename
+                            ? setRenaming({ id: t.id, label: t.label })
+                            : toast.info(tr('task.renameDemo'))
+                        }
+                      >
+                        {tr('task.rename')}
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => toast.info('示意，未接后端')}>
-                        以此为模板新建
+                      {/*
+                       * 以此为模板新建：带来源 id 跳新建页，由各模块的新建页解析预填。
+                       * 未接后端的模块（train/export）忽略该参数，退化为普通新建。
+                       */}
+                      <DropdownMenuItem
+                        onClick={() => navigate(`${module.path}/new?from=${encodeURIComponent(t.id)}`)}
+                      >
+                        {tr('task.useAsTemplate')}
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         variant="destructive"
-                        onClick={() => toast.info('示意，未接后端')}
+                        onClick={() => toast.info(tr('task.demoBadge'))}
                       >
                         <Trash2 />
-                        删除
+                        {tr('task.delete')}
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -388,6 +504,16 @@ export function TaskListPage({
           </div>
         )}
       </Column>
+
+      {/* 重命名弹窗放列表外层：不在任何行内，portal 事件不会窜到行点击 */}
+      {renaming && options.onRename && (
+        <RenameDialog
+          key={renaming.id}
+          target={renaming}
+          onConfirm={options.onRename}
+          onClose={() => setRenaming(null)}
+        />
+      )}
     </>
   );
 }

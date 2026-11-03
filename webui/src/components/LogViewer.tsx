@@ -32,7 +32,12 @@ export function LogViewer({
    * 时间戳行放最后，因为它只是想把噪音压灰，不该盖掉前面几类。
    */
   const colorOf = (line: string) => {
-    if (/\b(ERROR|Traceback|CUDA out of memory|FAILED)\b/.test(line)) return 'var(--state-failed)';
+    /* [workflow] 边界行：编排执行的节段标记（编译结果、节点完成、recipe 分派），
+     * 用 accent 色突出方便扫「跑到哪了」——它是线性日志里唯一的结构性信息 */
+    if (line.startsWith('[workflow]')) return 'var(--chart-2)';
+    if (/\b(ERROR|Traceback|CUDA out of memory|FAILED)\b/.test(line) || line.includes('运行失败')) {
+      return 'var(--state-failed)';
+    }
     if (/\bWARN(ING)?\b/.test(line)) return 'var(--state-paused)';
     /* 整行 JSON 一般是 metrics 落盘，跟正文区分开好扫 */
     if (line.startsWith('{')) return 'var(--chart-3)';

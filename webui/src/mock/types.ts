@@ -7,7 +7,7 @@
 /** 任务状态。由后端从 exit_code + 查活推导，前端只负责显示，不自己算 */
 export type TaskStatus = 'RUNNING' | 'DONE' | 'FAILED' | 'PAUSED';
 
-export type TaskType = 'train' | 'eval' | 'export' | 'deploy' | 'workflow';
+export type TaskType = 'train' | 'eval' | 'export' | 'deploy' | 'workflow' | 'research' | 'scripts';
 
 /** 拉起方式：只有两种，连不连 server 是 payload 属性而非 runner */
 export type RunnerKind = 'local' | 'ray';
@@ -29,6 +29,8 @@ export interface TaskItem {
   totalSteps?: number;
   /** deploy 起来后进程写回 runtime.json 的实际地址 */
   endpoint?: string;
+  /** 创建本任务的命令行：详情页展示，复制到终端可直接复现 */
+  createCommand?: string;
   /** 失败原因摘要 */
   error?: string;
 }

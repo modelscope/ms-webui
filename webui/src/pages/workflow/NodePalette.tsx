@@ -2,8 +2,9 @@ import { useMemo, useState } from 'react';
 import { Search } from 'lucide-react';
 import { Hint } from '@/components/Hint';
 import { Input } from '@/components/ui/input';
-import { CATEGORY_ORDER, NODE_TYPE_LIST, PORT_TYPES } from './nodeTypes';
+import { CATEGORY_ORDER, NODE_TYPE_LIST, PORT_TYPES, nodeLabel } from './nodeTypes';
 import type { NodeTypeDef } from './nodeTypes';
+import { useT } from '@/i18n';
 
 /**
  * 左侧组件面板。两种添加方式都支持：
@@ -11,10 +12,11 @@ import type { NodeTypeDef } from './nodeTypes';
  */
 export function NodePalette({ onAdd }: { onAdd: (typeKey: string) => void }) {
   const [kw, setKw] = useState('');
+  const { t } = useT();
 
   const grouped = useMemo(() => {
     const hit = NODE_TYPE_LIST.filter(
-      (d) => kw === '' || d.label.includes(kw) || d.key.includes(kw.toLowerCase()),
+      (d) => kw === '' || d.label.includes(kw) || d.labelKey?.includes(kw) || d.key.includes(kw.toLowerCase()),
     );
     return CATEGORY_ORDER.map((c) => ({
       category: c,
@@ -25,14 +27,14 @@ export function NodePalette({ onAdd }: { onAdd: (typeKey: string) => void }) {
   return (
     <div className="bg-sidebar border-sidebar-border flex w-54 flex-none flex-col overflow-hidden border-e">
       <div className="px-2.5 pt-2.5 pb-2">
-        <div className="text-sidebar-foreground/45 mb-2 ps-0.5 text-xs">组件</div>
+        <div className="text-sidebar-foreground/45 mb-2 ps-0.5 text-xs">{t('wf.paletteTitle')}</div>
         {/* 搜索图标压在输入框里，所以给输入框留出左侧内边距 */}
         <div className="relative">
           <Search className="text-sidebar-foreground/45 pointer-events-none absolute start-2 top-1/2 size-3 -translate-y-1/2" />
           <Input
             value={kw}
             onChange={(e) => setKw(e.target.value)}
-            placeholder="搜索组件"
+            placeholder={t('wf.paletteSearch')}
             className="text-sidebar-foreground placeholder:text-sidebar-foreground/40 h-8 border-white/10 bg-white/6 ps-7 text-[13px]"
           />
         </div>
@@ -42,7 +44,7 @@ export function NodePalette({ onAdd }: { onAdd: (typeKey: string) => void }) {
         {grouped.map((g) => (
           <div key={g.category} className="mb-3">
             <div className="text-sidebar-foreground/45 px-1 pt-1.5 pb-1 text-[11px] tracking-wide">
-              {g.category}
+              {t(g.category)}
             </div>
             {g.items.map((d) => (
               <PaletteItem key={d.key} def={d} onAdd={onAdd} />
@@ -52,25 +54,26 @@ export function NodePalette({ onAdd }: { onAdd: (typeKey: string) => void }) {
       </div>
 
       <div className="border-sidebar-border text-sidebar-foreground/45 flex-none border-t px-3 py-2.5 text-[11.5px] leading-[17px]">
-        拖到画布，或点一下加到中央
+        {t('wf.paletteFoot')}
       </div>
     </div>
   );
 }
 
 function PaletteItem({ def, onAdd }: { def: NodeTypeDef; onAdd: (k: string) => void }) {
+  const { t } = useT();
   /** 端口类型比个数有用：知道要接什么才知道往哪拖 */
   const io = (ps: NodeTypeDef['inputs']) =>
-    ps.length ? ps.map((p) => PORT_TYPES[p.type].label).join(' + ') : '—';
+    ps.length ? ps.map((p) => t(PORT_TYPES[p.type].label)).join(' + ') : '—';
 
   return (
     <Hint
       side="right"
       title={
         <div className="text-xs leading-[18px]">
-          {def.hint && <div className="mb-0.5">{def.hint}</div>}
+          {def.hint && <div className="mb-0.5">{t(def.hint)}</div>}
           <div className="opacity-70">
-            入 {io(def.inputs)} → 出 {io(def.outputs)}
+            {t('wf.paletteIo', { in: io(def.inputs), out: io(def.outputs) })}
           </div>
         </div>
       }
@@ -96,7 +99,7 @@ function PaletteItem({ def, onAdd }: { def: NodeTypeDef; onAdd: (k: string) => v
         <span className="inline-flex flex-none [&>svg]:size-3.5" style={{ color: def.color }}>
           {def.icon}
         </span>
-        <span className="truncate">{def.label}</span>
+        <span className="truncate">{nodeLabel(def, t)}</span>
       </div>
     </Hint>
   );

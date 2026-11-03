@@ -3,18 +3,20 @@ import { Bot, Pause, Play, Square } from 'lucide-react';
 import { cn } from 'cn';
 import { Hint } from '@/components/Hint';
 import { Button } from '@/components/ui/button';
-import { AiChatPanel, userMessage } from '@/components/AiChatPanel';
+import { AiChatPanel } from '@/components/AiChatPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import type { GraphEdge, GraphNode } from './nodeTypes';
 import type { AiAction, FlowMessage } from './aiAssist';
-import { askAi, describeAction, flowIntro } from './aiAssist';
+import { describeAction, flowIntro, makeAiSend } from './aiAssist';
+import { useT } from '@/i18n';
+import type { MessageKey } from '@/i18n';
 
 export type RunState = 'idle' | 'running' | 'paused';
 
-const RUN: Record<RunState, { text: string; tone: string }> = {
-  idle: { text: '未启动', tone: 'text-muted-foreground' },
-  running: { text: '正在运行', tone: 'text-emerald-500' },
-  paused: { text: '已暂停', tone: 'text-amber-500' },
+const RUN: Record<RunState, { text: MessageKey; tone: string }> = {
+  idle: { text: 'wf.runIdle', tone: 'text-muted-foreground' },
+  running: { text: 'task.running', tone: 'text-emerald-500' },
+  paused: { text: 'wf.runPaused', tone: 'text-amber-500' },
 };
 
 /**
@@ -52,20 +54,31 @@ export function FlowAssistant({
   const [messages, setMessages] = useState<FlowMessage[]>([]);
   const [draft, setDraft] = useState('');
   const running = runState === 'running';
+  const { t } = useT();
 
   // 第一次打开时给一句开场白。之后再开保留上次的对话
   useEffect(() => {
     if (open && messages.length === 0) {
-      setMessages([flowIntro({ nodes, edges, presetLabel, running })]);
+      setMessages([flowIntro({ nodes, edges, presetLabel, running }, t)]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  /*
+   * 真后端优先：有已配置的模型就走流式 LLM（system 注入图上下文，末尾的
+   * ```action 块解析成动作卡片，控制类卡片点了就代用户启停）；一个模型都
+   * 没有时退回离线剧本，页面不空转。发送逻辑与节点面板共用 makeAiSend。
+   */
+  const aiSend = makeAiSend({
+    ctx: () => ({ nodes, edges, presetLabel, running }),
+    t,
+    setMessages,
+  });
   const send = () => {
     const text = draft.trim();
     if (!text) return;
     setDraft('');
-    setMessages((m) => [...m, userMessage(text), askAi(text, { nodes, edges, presetLabel, running })]);
+    void aiSend(text);
   };
 
   const handleAction = (msgId: string, index: number, next: 'applied' | 'ignored') => {
@@ -99,7 +112,7 @@ export function FlowAssistant({
         <SheetHeader className="px-4 py-3">
           <SheetTitle className="flex items-center gap-2 text-sm">
             <Bot className="text-primary size-4" />
-            流程助手
+            {t('wf.assistant')}
           </SheetTitle>
         </SheetHeader>
 
@@ -109,19 +122,19 @@ export function FlowAssistant({
             <span
               className={cn('size-[7px] rounded-full bg-current', running && 'status-dot-live')}
             />
-            {state.text}
+            {t(state.text)}
           </span>
           <span className="text-muted-foreground text-xs">
-            {done}/{nodes.length} 已完成
-            {failed > 0 && <span className="text-red-500">　{failed} 失败</span>}
+            {t('wf.doneCount', { done, total: nodes.length })}
+            {failed > 0 && <span className="text-red-500">　{t('wf.failedCount', { n: failed })}</span>}
           </span>
 
           <span className="ms-auto flex gap-1.5">
             {running ? (
-              <Hint title="停在当前 step，已写盘的 checkpoint 留着">
+              <Hint title={t('wf.pauseHint')}>
                 <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => onControl('pause')}>
                   <Pause />
-                  暂停
+                  {t('task.pause')}
                 </Button>
               </Hint>
             ) : (
@@ -131,10 +144,10 @@ export function FlowAssistant({
                 onClick={() => onControl(runState === 'paused' ? 'resume' : 'start')}
               >
                 <Play />
-                {runState === 'paused' ? '继续' : '启动'}
+                {runState === 'paused' ? t('task.resume') : t('wf.startBtn')}
               </Button>
             )}
-            <Hint title="结束这次运行，进程不保留">
+            <Hint title={t('wf.stopHint')}>
               <Button
                 variant="outline"
                 size="icon"
@@ -150,7 +163,7 @@ export function FlowAssistant({
 
         <AiChatPanel
           messages={messages}
-          describe={(a) => describeAction(a, nodes)}
+          describe={(a) => describeAction(a, nodes, t)}
           draft={draft}
           onDraftChange={setDraft}
           onSend={send}
@@ -158,10 +171,10 @@ export function FlowAssistant({
           confirmBeforeApply={confirmBeforeApply}
           suggestions={
             running
-              ? ['先暂停一下', '为什么这么慢', '显存不够怎么办']
-              : ['帮我跑起来', '这张图在做什么', '优势为什么是 0']
+              ? [t('wf.sugPause'), t('wf.sugSlow'), t('wf.sugOom')]
+              : [t('wf.sugRun'), t('wf.sugWhatGraph'), t('wf.sugAdvZero')]
           }
-          placeholder="问问这张流程图……"
+          placeholder={t('wf.flowPlaceholder')}
         />
       </SheetContent>
     </Sheet>

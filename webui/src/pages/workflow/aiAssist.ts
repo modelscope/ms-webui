@@ -1,7 +1,10 @@
+import type { Dispatch, SetStateAction } from 'react';
 import type { AiMessage, ActionState, ProposalView } from '@/components/AiChatPanel';
-import { messageId } from '@/components/AiChatPanel';
+import { messageId, userMessage } from '@/components/AiChatPanel';
+import { listModels, streamChat } from '@/api/models';
 import type { GraphEdge, GraphNode, NodeParam } from './nodeTypes';
-import { NODE_TYPES } from './nodeTypes';
+import { NODE_TYPES, nodeLabel } from './nodeTypes';
+import type { TFn } from './nodeTypes';
 
 /**
  * 编排页的 AI 协助层。
@@ -61,34 +64,38 @@ function reply(text: string, actions?: AiAction[]): FlowMessage {
 }
 
 /** 单个节点视角的开场白：直接把这个节点在干什么、接了什么说清楚 */
-export function nodeIntro(node: GraphNode, ctx: AiContext): FlowMessage {
+export function nodeIntro(node: GraphNode, ctx: AiContext, t: TFn): FlowMessage {
   const def = NODE_TYPES[node.type];
   const upstream = ctx.edges
     .filter((e) => e.to === node.id)
-    .map((e) => NODE_TYPES[ctx.nodes.find((n) => n.id === e.from)?.type ?? '']?.label)
+    .map((e) => nodeLabel(NODE_TYPES[ctx.nodes.find((n) => n.id === e.from)?.type ?? ''], t))
     .filter(Boolean);
   const downstream = ctx.edges
     .filter((e) => e.from === node.id)
-    .map((e) => NODE_TYPES[ctx.nodes.find((n) => n.id === e.to)?.type ?? '']?.label)
+    .map((e) => nodeLabel(NODE_TYPES[ctx.nodes.find((n) => n.id === e.to)?.type ?? ''], t))
     .filter(Boolean);
 
-  const lines = [`这是「${def.label}」。${def.hint ?? ''}`];
+  const lines = [t('wf.aiNodeIntroTitle', { label: nodeLabel(def, t), hint: def.hint ? t(def.hint) : '' })];
   lines.push(
-    upstream.length ? `上游接了：${[...new Set(upstream)].join('、')}` : '上游没接东西。',
+    upstream.length
+      ? t('wf.aiUpstream', { list: [...new Set(upstream)].join(t('wf.listSep')) })
+      : t('wf.aiNoUpstream'),
   );
   lines.push(
-    downstream.length ? `输出去到：${[...new Set(downstream)].join('、')}` : '输出还没接下游。',
+    downstream.length
+      ? t('wf.aiDownstream', { list: [...new Set(downstream)].join(t('wf.listSep')) })
+      : t('wf.aiNoDownstream'),
   );
   if (def.lockedPorts) {
-    lines.push('这个节点的连线是锁定的——它的两路数据必须同进同出，接错了不会报错，所以先不开放改。');
+    lines.push(t('wf.aiLockedNote'));
   }
-  lines.push('想问什么都可以，比如为什么这么设、这个参数调大调小会怎样。');
+  lines.push(t('wf.aiAskAnything'));
   return reply(lines.join('\n'));
 }
 
 /** 整图视角的开场白。跟整图兜底是同一套话，统一从这里出 */
-export function flowIntro(ctx: AiContext): FlowMessage {
-  return askAi('', ctx);
+export function flowIntro(ctx: AiContext, t: TFn): FlowMessage {
+  return askAi('', ctx, t);
 }
 
 /**
@@ -97,52 +104,40 @@ export function flowIntro(ctx: AiContext): FlowMessage {
  * 剧本不是随便编的：每条都对应一个真实会被问到的问题，
  * 回答里引用的是图上当前的真实取值，所以看着才像真在读这张图。
  */
-export function askAi(question: string, ctx: AiContext): FlowMessage {
+export function askAi(question: string, ctx: AiContext, t: TFn): FlowMessage {
   const q = question.toLowerCase();
   const node = ctx.node;
 
   /* ---- 控制类：启动 / 暂停 ---- */
   if (/暂停|停一下|停下|pause/.test(q)) {
     return reply(
-      ctx.running
-        ? '好，我停在当前 step。已经写盘的 checkpoint 会留着，继续的时候从最近一个接上——中间那半步的梯度会丢，这是正常的。'
-        : '现在没在跑，没什么可暂停的。要我起一次吗？',
+      ctx.running ? t('wf.aiPauseRunning') : t('wf.aiPauseIdle'),
       ctx.running ? [{ kind: 'control', op: 'pause' }] : [{ kind: 'control', op: 'start' }],
     );
   }
   if (/继续|恢复|resume/.test(q)) {
-    return reply('从最近一个 checkpoint 接着跑。', [{ kind: 'control', op: 'resume' }]);
+    return reply(t('wf.aiResume'), [{ kind: 'control', op: 'resume' }]);
   }
   if (/停止|终止|别跑了|stop|kill/.test(q)) {
-    return reply('整个任务停掉，不保留进程。已存的 checkpoint 不动。', [
-      { kind: 'control', op: 'stop' },
-    ]);
+    return reply(t('wf.aiStop'), [{ kind: 'control', op: 'stop' }]);
   }
   if (/跑起来|启动|开始训|运行|开跑|start|run/.test(q)) {
     return reply(
-      `这张图 ${ctx.nodes.length} 个节点、${ctx.edges.length} 根线，我按拓扑顺序提交。`,
+      t('wf.aiStart', { n: ctx.nodes.length, m: ctx.edges.length }),
       [{ kind: 'control', op: 'start' }],
     );
   }
 
   /* ---- 显存 ---- */
   if (/oom|显存|内存不够|out of memory|爆了/.test(q)) {
-    const trainer = ctx.nodes.find((n) => n.type === 'trainer');
+    const trainer = ctx.nodes.find((n) => n.type === 'train_step');
     const cur = trainer ? paramValue(trainer, 'micro_batch_size') : undefined;
     const actions: AiAction[] =
       trainer && cur && Number(cur) > 1
         ? [{ kind: 'param', nodeId: trainer.id, label: 'micro_batch_size', to: '1' }]
         : [];
     return reply(
-      [
-        '按代价从小到大来：',
-        `1. 先降 micro_batch_size${cur ? `（现在是 ${cur}）` : ''}，这个最便宜，只影响单卡一次塞多少`,
-        '2. 再靠梯度累积把等效 batch 补回来，效果基本等价，就是慢一点',
-        '3. 还不够就开 gradient checkpointing，拿重算换显存',
-        '4. 最后才考虑换卡或者上并行',
-        '',
-        '顺带一句：如果是采样阶段爆的，那得去调推理引擎的 gpu_memory_util，跟训练这边不是一回事。',
-      ].join('\n'),
+      t('wf.aiOom', { cur: cur ? t('wf.aiOomCur', { cur }) : '' }),
       actions,
     );
   }
@@ -152,20 +147,14 @@ export function askAi(question: string, ctx: AiContext): FlowMessage {
     const adv = ctx.nodes.find((n) => n.type === 'advantage');
     const numGen = adv ? paramValue(adv, 'num_generations') : undefined;
     return reply(
-      [
-        'GRPO 的优势是组内比较出来的：一组里减掉均值再除标准差。',
-        `所以一组${numGen ? ` ${numGen} 条` : ''}答案如果全对或者全错，方差就是 0，整组优势全是 0——这一组白跑了，梯度是零。`,
-        '',
-        '两个方向：把题目难度拉开，让一组里有对有错；或者把 num_generations 提上去，撞到不同结果的概率大一些。',
-        '要注意后者是线性涨采样成本的。',
-      ].join('\n'),
+      t('wf.aiAdvZero', { ng: numGen ? t('wf.aiNg', { n: numGen }) : '' }),
     );
   }
 
   /* ---- 速度 ---- */
-  if (/慢|快一点|速度|太久|加速/.test(q)) {
+  if (/慢|快一点|速度|太久|加速|slow|faster|speed|too long|accelerate/.test(q)) {
     const rollout = ctx.nodes.find(
-      (n) => n.type === 'multi_turn_rollout' || n.type === 'rollout',
+      (n) => n.type === 'rollout' || n.type === 'generate',
     );
     const gen = rollout ? paramValue(rollout, 'num_generations') : undefined;
     const actions: AiAction[] =
@@ -173,42 +162,19 @@ export function askAi(question: string, ctx: AiContext): FlowMessage {
         ? [{ kind: 'param', nodeId: rollout.id, label: 'num_generations', to: '4' }]
         : [];
     return reply(
-      [
-        'RL 的时间基本都花在采样上，不在反向传播上。所以先看这几个：',
-        `· num_generations${gen ? `（现在 ${gen}）`: ''}：这是乘数，减半就快接近一倍`,
-        '· max_tokens：模型爱写长文的时候，这个比什么都影响大',
-        '· max_turns：多轮场景里每多一轮就多一次完整的生成',
-        '',
-        '调试阶段我建议先把这三个都压到最小，把流程跑通了再放开。',
-      ].join('\n'),
+      t('wf.aiSpeed', { gen: gen ? t('wf.aiGenNow', { n: gen }) : '' }),
       actions,
     );
   }
 
   /* ---- 轨迹对错位 ---- */
-  if (/错位|对不上|对齐|过滤|丢样本|filter/.test(q)) {
-    return reply(
-      [
-        '这是多轮 RL 里最难查的一类问题：轨迹、奖励、优势是三个等长的列表，靠下标对应。',
-        '一旦某一路被过滤掉几条而另外两路没同步删，剩下的全部错位——',
-        '而且它不报错，训练照跑，只是学的东西对不上。',
-        '',
-        '所以画布上「轨迹过滤」的连线是锁死的：两路必须同进同出，',
-        '而且优势必须在过滤之前算好。先过滤再算，组内归一化的分母就变了。',
-      ].join('\n'),
-    );
+  if (/错位|对不上|对齐|过滤|丢样本|filter|misalign|out of sync/.test(q)) {
+    return reply(t('wf.aiMisalign'));
   }
 
   /* ---- 学习率 ---- */
   if (/学习率|lr|learning rate/.test(q)) {
-    return reply(
-      [
-        'RL 微调的学习率通常要比 SFT 小一个量级——策略更新一步走太远，采样分布就跟不上了。',
-        'LoRA 的话可以稍大一些，因为动的参数少。',
-        '',
-        '判断依据不是数值本身，是看 clip_ratio：如果它一直贴在上限，说明步子太大了。',
-      ].join('\n'),
-    );
+    return reply(t('wf.aiLr'));
   }
 
   /* ---- 节点上下文相关的兜底 ---- */
@@ -216,32 +182,22 @@ export function askAi(question: string, ctx: AiContext): FlowMessage {
     const def = NODE_TYPES[node.type];
     const ps = paramsOf(node);
     return reply(
-      [
-        `关于「${def.label}」，我现在能看到的是：`,
-        ...ps.map((p) => `· ${p.label} = ${p.value}`),
-        '',
-        def.hint ?? '',
-        '',
-        '想调哪个参数直接说，我会给出建议值，你点应用才会改到图上。',
-      ]
-        .filter(Boolean)
-        .join('\n'),
+      t('wf.aiNodeFallback', {
+        label: nodeLabel(def, t),
+        params: ps.map((p) => `· ${p.label} = ${p.value}`).join('\n'),
+        hint: def.hint ? t(def.hint) : '—',
+      }),
     );
   }
 
   /* ---- 整图兜底 ---- */
   return reply(
-    [
-      `当前是「${ctx.presetLabel}」，${ctx.nodes.length} 个节点、${ctx.edges.length} 根连线，${ctx.running ? '正在运行' : '还没启动'}。`,
-      '',
-      '我能帮的几类事：',
-      '· 解释某个节点或某个参数是干什么的',
-      '· 显存不够、跑得太慢、优势为 0 这类具体问题的排查顺序',
-      '· 提议改参数或加节点——我只提议，你点了应用才生效',
-      '· 启动、暂停、继续、停止',
-      '',
-      '直接说你卡在哪就行。',
-    ].join('\n'),
+    t('wf.aiGraphFallback', {
+      preset: ctx.presetLabel,
+      n: ctx.nodes.length,
+      m: ctx.edges.length,
+      state: ctx.running ? t('wf.aiStateRunning') : t('wf.aiStateIdle'),
+    }),
   );
 }
 
@@ -251,21 +207,195 @@ export function askAi(question: string, ctx: AiContext): FlowMessage {
  * 翻译放在这里而不是面板里：面板是通用的，它不知道 nodeId 对应哪个节点，
  * 也不该知道——新建页那边的提议改的是表单字段，压根没有节点这回事。
  */
-export function describeAction(a: AiAction, nodes: GraphNode[]): ProposalView {
+export function describeAction(a: AiAction, nodes: GraphNode[], t: TFn): ProposalView {
   /* 控制类（启停）比改个参数重得多，给它醒目色 */
-  return { label: actionLabel(a, nodes), heavy: a.kind === 'control' };
+  return { label: actionLabel(a, nodes, t), heavy: a.kind === 'control' };
 }
 
-function actionLabel(a: AiAction, nodes: GraphNode[]): string {
+function actionLabel(a: AiAction, nodes: GraphNode[], t: TFn): string {
   if (a.kind === 'param') {
     const n = nodes.find((x) => x.id === a.nodeId);
-    const label = n ? NODE_TYPES[n.type].label : a.nodeId;
+    const label = n ? nodeLabel(NODE_TYPES[n.type], t) : a.nodeId;
     const cur = n ? paramValue(n, a.label) : undefined;
-    return `${label}：${a.label} ${cur ? `${cur} → ` : '改为 '}${a.to}`;
+    return t('wf.aiActParam', {
+      label,
+      param: a.label,
+      from: cur ? `${cur} → ` : t('wf.aiActSetTo'),
+      to: a.to,
+    });
   }
   if (a.kind === 'addNode') {
-    return `加一个「${NODE_TYPES[a.typeKey]?.label ?? a.typeKey}」节点`;
+    return t('wf.aiAddNode', { label: nodeLabel(NODE_TYPES[a.typeKey], t) || a.typeKey });
   }
-  const ops = { start: '启动整图', pause: '暂停', resume: '继续', stop: '停止' };
+  const ops = { start: t('wf.aiOpStart'), pause: t('task.pause'), resume: t('task.resume'), stop: t('task.stop') };
   return ops[a.op];
+}
+
+
+// --- 真后端接入层 ------------------------------------------------------------
+
+// askAi() 是离线剧本（关键词匹配）；真 LLM 走下面这组函数。动作协议：模型在
+// 回复末尾可以用一个 ```action 代码块提议动作（一个 JSON 数组，每项一个
+// AiAction），正文里不要重复动作内容——卡片由前端解析渲染，应用仍需用户确认。
+
+const ACTION_BLOCK_RE = /\n?```action\n([\s\S]*?)```\n?/g;
+
+/** 把回复正文拆成 [纯文本, 动作数组]；解析失败的动作整块丢弃（宁可没有不可错的）。 */
+export function splitActionBlocks(text: string): { body: string; actions: AiAction[] } {
+  const actions: AiAction[] = [];
+  let body = text;
+  for (const m of text.matchAll(ACTION_BLOCK_RE)) {
+    try {
+      const parsed = JSON.parse(m[1]);
+      const arr = Array.isArray(parsed) ? parsed : [parsed];
+      for (const a of arr) {
+        if (a && typeof a === 'object') {
+          if (a.kind === 'control' && ['start', 'pause', 'resume', 'stop'].includes(a.op)) {
+            actions.push({ kind: 'control', op: a.op });
+          } else if (a.kind === 'param' && a.nodeId && a.label && a.to !== undefined) {
+            actions.push({ kind: 'param', nodeId: String(a.nodeId), label: String(a.label), to: String(a.to) });
+          } else if (a.kind === 'addNode' && a.typeKey && a.note) {
+            actions.push({ kind: 'addNode', typeKey: String(a.typeKey), note: String(a.note) });
+          }
+        }
+      }
+    } catch {
+      // JSON 坏了就当没提议——正文仍然完整可用
+    }
+  }
+  body = text.replace(ACTION_BLOCK_RE, '\n').trimEnd();
+  return { body, actions };
+}
+
+/** 图的文本摘要：system prompt 的主体。只放事实（类型/参数/连线），不放解读。 */
+export function graphContextText(ctx: AiContext): string {
+  const lines: string[] = [];
+  lines.push(`流程图「${ctx.presetLabel}」，${ctx.nodes.length} 个节点、${ctx.edges.length} 根连线，运行状态 ${ctx.running ? 'running' : 'idle'}。`);
+  for (const n of ctx.nodes) {
+    const def = NODE_TYPES[n.type];
+    const params = paramsOf(n)
+      .map((p) => `${p.label}=${p.value}`)
+      .join(', ');
+    lines.push(`- 节点 ${n.id}（${def?.label ?? n.type}）${params ? `：${params}` : ''}`);
+  }
+  for (const e of ctx.edges) {
+    lines.push(`- 连线 ${e.from}:${e.fromPort} -> ${e.to}:${e.toPort}`);
+  }
+  return lines.join('\n');
+}
+
+export const ASSISTANT_SYSTEM_PROMPT = `你是 ms-swift 可视化编排页的流程助手。用户正在一张拖拽组装的训练流程图上工作，你回答关于这张图的问题。
+回答规则：
+- 简洁直接，先给结论再给理由；引用图上的真实取值时用节点 id 或参数名。
+- 图能直接跑的参数问题给具体建议；超出图能力的（改骨架、换算法拓扑）明说做不到和为什么。
+- 想替用户执行操作时，在回复末尾加一个 \`\`\`action 代码块，内容是一个 JSON 数组，每项形如：
+  {"kind":"param","nodeId":"节点id","label":"参数名","to":"新值"}（改参数）
+  {"kind":"control","op":"start"}（start/pause/resume/stop 之一）
+  {"kind":"addNode","typeKey":"组件类型key","note":"为什么加"}（加节点）
+- 动作只是提议：用户点了卡片才会生效。正文里说明为什么提议即可，不要催用户应用。
+- 不确定就说不确定，不要编造图上不存在的参数或节点。`;
+
+/**
+ * 真后端流式问答：按登记顺序逐个尝试已配置的模型（第一个欠费/断连时换
+ * 下一个，都失败才整体失败），onDelta 每次给目前为止的累计全文；一个模型
+ * 都没有时返回 null（调用方回落离线剧本，页面不空转）。ctx 里带 node 时
+ * 说明用户正盯着这个节点，system 里点名让它优先答相关问题。
+ */
+export async function streamAiReply(
+  text: string,
+  ctx: AiContext,
+  hooks: { onStart?: () => void; onDelta: (acc: string) => void },
+): Promise<string | null> {
+  let ids: string[] = [];
+  try {
+    ids = (await listModels()).map((m) => m.id);
+  } catch {
+    ids = [];
+  }
+  if (!ids.length) return null;
+  hooks.onStart?.();
+  const focus = ctx.node
+    ? `用户当前选中的节点：${ctx.node.id}（${NODE_TYPES[ctx.node.type]?.label ?? ctx.node.type}）。优先回答与它相关的问题。\n\n`
+    : '';
+  for (const modelId of ids) {
+    let buf = '';
+    try {
+      await streamChat(
+        modelId,
+        [
+          { role: 'system', content: `${ASSISTANT_SYSTEM_PROMPT}\n\n${focus}当前图：\n${graphContextText(ctx)}` },
+          { role: 'user', content: text },
+        ],
+        (parts) => {
+          buf += parts.content ?? '';
+          hooks.onDelta(buf);
+        },
+      );
+      return buf;
+    } catch {
+      /* 已收到内容的半截流保留已到部分，不再换模型重发（重发会在占位上重复正文） */
+      if (buf) return buf;
+    }
+  }
+  throw new Error('all chat models failed');
+}
+
+/**
+ * 两个 AI 入口（整图抽屉 FlowAssistant / 节点面板 NodeInspector）共用的发送
+ * 函数：流式渲染 LLM 回复，末尾的 ```action 块解析成动作卡片；无模型回落
+ * askAi 剧本。差异只在 ctx（有没有 node），消息状态管理两边完全同构，收拢
+ * 在这里以免两份实现日后漂移。
+ */
+export function makeAiSend(opts: {
+  ctx: () => AiContext;
+  t: TFn;
+  setMessages: Dispatch<SetStateAction<FlowMessage[]>>;
+}): (text: string) => Promise<void> {
+  return async (text) => {
+    const ctx = opts.ctx();
+    let acc = '';
+    let placeholderId = '';
+    const finalize = () => {
+      const { body, actions } = splitActionBlocks(acc);
+      opts.setMessages((ms) =>
+        ms.map((m) =>
+          m.id === placeholderId
+            ? {
+                ...m,
+                text: body,
+                pending: false,
+                actions: actions.length ? actions : undefined,
+                states: actions.length ? actions.map(() => 'pending' as ActionState) : undefined,
+              }
+            : m,
+        ),
+      );
+    };
+    try {
+      const reply = await streamAiReply(text, ctx, {
+        onStart: () => {
+          placeholderId = messageId();
+          opts.setMessages((m) => [
+            ...m,
+            userMessage(text),
+            { id: placeholderId, role: 'assistant', text: '', pending: true },
+          ]);
+        },
+        onDelta: (delta) => {
+          acc = delta;
+          opts.setMessages((ms) =>
+            ms.map((m) => (m.id === placeholderId ? { ...m, text: acc } : m)),
+          );
+        },
+      });
+      if (reply === null) {
+        opts.setMessages((m) => [...m, userMessage(text), askAi(text, ctx, opts.t)]);
+        return;
+      }
+    } catch {
+      /* 流中断也保留已到的部分；一个字都没到才提示失败 */
+      acc = acc || opts.t('wf.streamFail');
+    }
+    finalize();
+  };
 }

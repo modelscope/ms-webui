@@ -1,18 +1,20 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Loader2, Play, RotateCw, X } from 'lucide-react';
 import { cn } from 'cn';
 import { Hint } from '@/components/Hint';
-import { AiChatPanel, userMessage } from '@/components/AiChatPanel';
-import { LogViewer } from '@/components/LogViewer';
+import { AiChatPanel } from '@/components/AiChatPanel';
 import { SegmentedControl } from '@/components/FormField';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import type { GraphEdge, GraphNode } from './nodeTypes';
-import { NODE_TYPES } from './nodeTypes';
-import type { NodeOutput, OutputBlock } from './nodeOutputs';
-import { failedOutput, outputOf } from './nodeOutputs';
+import { NODE_TYPES, nodeDefOf, nodeLabel } from './nodeTypes';
+import { OutputPreview, OutputPreviewDialog } from './OutputPreview';
+
 import type { AiAction, FlowMessage } from './aiAssist';
-import { askAi, describeAction, nodeIntro, paramsOf } from './aiAssist';
+import { describeAction, makeAiSend, nodeIntro, paramsOf } from './aiAssist';
+import { useT } from '@/i18n';
+import type { MessageKey } from '@/i18n';
 
 export type InspectorTab = 'params' | 'output' | 'ai';
 type Tab = InspectorTab;
@@ -22,11 +24,11 @@ type Tab = InspectorTab;
  * 用 Tailwind 调色板里的 amber/emerald/red 而不是主题色：
  * 这几个是「跑得怎么样」的通用信号，跟品牌色换不换没关系。
  */
-const STATUS: Record<GraphNode['status'], { text: string; tone: string }> = {
-  idle: { text: '未运行', tone: 'text-muted-foreground' },
-  running: { text: '正在运行', tone: 'text-amber-500' },
-  done: { text: '已完成', tone: 'text-emerald-500' },
-  failed: { text: '失败', tone: 'text-red-500' },
+const STATUS: Record<GraphNode['status'], { text: MessageKey; tone: string }> = {
+  idle: { text: 'wf.stIdle', tone: 'text-muted-foreground' },
+  running: { text: 'task.running', tone: 'text-amber-500' },
+  done: { text: 'task.done', tone: 'text-emerald-500' },
+  failed: { text: 'task.failed', tone: 'text-red-500' },
 };
 
 /**
@@ -47,6 +49,7 @@ export function NodeInspector({
   aiEnabled,
   confirmBeforeApply,
   tab,
+  sessionId,
   onClose,
   onRun,
   onParamChange,
@@ -65,6 +68,8 @@ export function NodeInspector({
    * 同一个东西两处各存一份，就会出现「点节点上的问 AI，面板却停在参数页」这种事。
    */
   tab: Tab;
+  /** 常驻会话 id：输出页的 preview（lane 分页 + 拷贝）打这个会话；空 = 尚无会话 */
+  sessionId?: string;
   onClose: () => void;
   onRun: (nodeId: string) => void;
   /**
@@ -76,34 +81,54 @@ export function NodeInspector({
   onAction: (a: AiAction) => void;
   onTabChange: (t: Tab) => void;
 }) {
-  const def = NODE_TYPES[node.type];
+  const def = nodeDefOf(node) ?? NODE_TYPES[node.type];
+  const { t } = useT();
 
   /* 设置里把 AI 关掉时，正停在 AI 页就退回参数页——不拦的话面板下半截是空的 */
   const active: Tab = tab === 'ai' && !aiEnabled ? 'params' : tab;
 
   const ctx = { node, nodes, edges, presetLabel, running };
-  const [messages, setMessages] = useState<FlowMessage[]>(() => [nodeIntro(node, ctx)]);
+  const [messages, setMessages] = useState<FlowMessage[]>(() => [nodeIntro(node, ctx, t)]);
   const [draft, setDraft] = useState('');
+  /* 输出预览的大窗：内容与内嵌版同一个组件，只是舞台更大 */
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   // 换节点才重开会话。只认 node.id：拖动节点位置、切 tab 都不该把对话清掉
   useEffect(() => {
-    setMessages([nodeIntro(node, { node, nodes, edges, presetLabel, running })]);
+    setMessages([nodeIntro(node, { node, nodes, edges, presetLabel, running }, t)]);
     setDraft('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [node.id]);
 
   const params = paramsOf(node);
-  const output: NodeOutput | null = useMemo(() => {
-    if (node.status === 'done') return outputOf(node);
-    if (node.status === 'failed') return failedOutput(node);
-    return null;
-  }, [node]);
+  /*
+   * 分区渲染：带 group 的连续参数聚成一节、共用一个小标题。
+   * 分区本身是定义在节点类型上的（主链 / 旋钮 / 观察），这里只负责把它画出来。
+   */
+  const sections: { name: MessageKey | ''; items: { p: (typeof params)[number]; i: number }[] }[] = [];
+  params.forEach((p, i) => {
+    const name = p.group ?? '';
+    if (sections.length === 0 || sections[sections.length - 1].name !== name) {
+      sections.push({ name, items: [] });
+    }
+    sections[sections.length - 1].items.push({ p, i });
+  });
 
+  /*
+   * 与整图助手同一条真 LLM 链路（makeAiSend）：system 里点名当前节点让它
+   * 优先答相关问题，```action 提议照样解析成卡片——在单个节点上问「把这个
+   * 调小点」也能直接落成改参数卡片。无可用模型时回落离线剧本。
+   */
+  const aiSend = makeAiSend({
+    ctx: () => ({ node, nodes, edges, presetLabel, running }),
+    t,
+    setMessages,
+  });
   const send = () => {
     const text = draft.trim();
     if (!text) return;
     setDraft('');
-    setMessages((m) => [...m, userMessage(text), askAi(text, { node, nodes, edges, presetLabel, running })]);
+    void aiSend(text);
   };
 
   const handleAction = (msgId: string, index: number, next: 'applied' | 'ignored') => {
@@ -120,9 +145,9 @@ export function NodeInspector({
   };
 
   const tabs = [
-    { label: '参数', value: 'params' },
-    { label: '输出', value: 'output' },
-    ...(aiEnabled ? [{ label: '问 AI', value: 'ai' }] : []),
+    { label: t('wf.tabParams'), value: 'params' },
+    { label: t('wf.tabOutput'), value: 'output' },
+    ...(aiEnabled ? [{ label: t('wf.tabAi'), value: 'ai' }] : []),
   ];
 
   const status = STATUS[node.status];
@@ -139,7 +164,7 @@ export function NodeInspector({
             {def.icon}
           </span>
           <span className="text-foreground min-w-0 flex-1 truncate text-sm font-semibold">
-            {def.label}
+            {nodeLabel(def, t)}
           </span>
           <Button variant="ghost" size="icon" className="size-7" onClick={onClose}>
             <X />
@@ -150,16 +175,8 @@ export function NodeInspector({
           <span className={cn('inline-flex items-center gap-1.5 text-xs', status.tone)}>
             {/* bg-current：点跟着文字同色，状态色只写一处 */}
             <span className="size-1.5 rounded-full bg-current" />
-            {status.text}
+            {t(status.text)}
           </span>
-          {/*
-            elapsed 为 '—' 的意思是「这类节点没有单次耗时」——工具定义、指标上报、
-            优化器都是声明式或常驻的。既然没有值，就别把「耗时 —」这行占着位置摆在那。
-          */}
-          {output && output.elapsed !== '—' && (
-            <span className="text-muted-foreground text-xs">耗时 {output.elapsed}</span>
-          )}
-
           {/*
             所有节点都能单独跑。声明式节点（模型、优化器）跑一次的意思是
             「把它准备好」——加载权重、把生效配置定下来，这也是有输出可看的。
@@ -168,7 +185,7 @@ export function NodeInspector({
             title={
               def.runnable
                 ? undefined
-                : '这个节点是声明式的，跑一次只是把它准备好，输出里能看到加载结果和生效配置'
+                : t('wf.declaredRunHint')
             }
           >
             <Button
@@ -185,7 +202,7 @@ export function NodeInspector({
               ) : (
                 <RotateCw />
               )}
-              {node.status === 'idle' ? '运行' : node.status === 'running' ? '运行中' : '重跑'}
+              {node.status === 'idle' ? t('wf.runBtn') : node.status === 'running' ? t('task.running') : t('wf.rerunBtn')}
             </Button>
           </Hint>
         </div>
@@ -198,53 +215,87 @@ export function NodeInspector({
       {active === 'params' && (
         <div className="min-h-0 flex-1 overflow-auto px-3 pt-3 pb-4">
           {params.length === 0 ? (
-            <EmptyHint>这个节点没有可调参数</EmptyHint>
+            <EmptyHint>{t('wf.noParams')}</EmptyHint>
           ) : (
-            <div className="flex flex-col gap-2.5">
-              {params.map((p, i) => (
-                <label key={`${p.label}-${i}`} className="block">
-                  <span className="text-muted-foreground mb-1 block text-xs">{p.label}</span>
-                  <Input
-                    className="h-8"
-                    value={p.value}
-                    onChange={(e) => onParamChange(node.id, i, e.target.value)}
-                  />
-                </label>
+            <div className="flex flex-col gap-3.5">
+              {sections.map((s, si) => (
+                <div key={si} className="flex flex-col gap-2.5">
+                  {s.name && (
+                    <div className="text-muted-foreground/80 border-b border-b-border/60 pb-1 text-[11px] font-medium tracking-wide">
+                      {t(s.name)}
+                    </div>
+                  )}
+                  {s.items.map(({ p, i }) => (
+                    <label key={`${p.label}-${i}`} className="block">
+                      <span className="text-muted-foreground mb-1 block text-xs">{p.label}</span>
+                      {p.ptype === 'dict' || p.ptype === 'list' ? (
+                        /* JSON 参数（编码配置、生成配置这类）给多行编辑：
+                         * 单行输入框里改 JSON 是反人类操作，system 定制也走这里 */
+                        <Textarea
+                          className="min-h-[64px] resize-y font-mono text-[11.5px]"
+                          value={p.value}
+                          onChange={(e) => onParamChange(node.id, i, e.target.value)}
+                        />
+                      ) : (
+                        <Input
+                          className="h-8"
+                          value={p.value}
+                          onChange={(e) => onParamChange(node.id, i, e.target.value)}
+                        />
+                      )}
+                    </label>
+                  ))}
+                </div>
               ))}
             </div>
           )}
           {def.hint && (
             <div className="bg-secondary text-muted-foreground mt-3.5 rounded-[10px] px-3 py-2.5 text-xs leading-[19px]">
-              {def.hint}
+              {t(def.hint)}
             </div>
           )}
         </div>
       )}
 
       {active === 'output' && (
-        <div className="min-h-0 flex-1 overflow-auto px-3 pt-3 pb-4">
-          {node.status === 'idle' && <EmptyHint>还没跑过，跑一次才有输出</EmptyHint>}
+        <div className="flex min-h-0 flex-1 flex-col px-3 pt-3 pb-4">
+          {node.status === 'idle' && <EmptyHint>{t('wf.noOutputHint')}</EmptyHint>}
           {node.status === 'running' && (
             <div className="text-muted-foreground flex items-center justify-center gap-1.5 py-5 text-xs">
-              <Loader2 className="size-3.5 animate-spin" /> 正在跑，跑完这里会有输出
+              <Loader2 className="size-3.5 animate-spin" /> {t('wf.runningOutput')}
             </div>
           )}
-          {output && <OutputView output={output} />}
+          {node.status === 'done' && sessionId && (
+            <OutputPreview
+              sessionId={sessionId}
+              nodeId={node.id}
+              onPopup={() => setPreviewOpen(true)}
+            />
+          )}
         </div>
       )}
 
       {active === 'ai' && (
         <AiChatPanel
           messages={messages}
-          describe={(a) => describeAction(a, nodes)}
+          describe={(a) => describeAction(a, nodes, t)}
           draft={draft}
           onDraftChange={setDraft}
           onSend={send}
           onAction={handleAction}
           confirmBeforeApply={confirmBeforeApply}
           accent={def.color}
-          suggestions={suggestionsFor(node.type)}
-          placeholder={`问问「${def.label}」……`}
+          suggestions={suggestionsFor(node.type).map((s) => t(s))}
+          placeholder={t('wf.aiPlaceholder', { label: nodeLabel(def, t) })}
+        />
+      )}
+      {sessionId && (
+        <OutputPreviewDialog
+          sessionId={sessionId}
+          nodeId={node.id}
+          nodeLabel={nodeLabel(def, t)}
+          open={previewOpen}
+          onOpenChange={setPreviewOpen}
         />
       )}
     </div>
@@ -257,109 +308,11 @@ function EmptyHint({ children }: { children: React.ReactNode }) {
 }
 
 /** 按节点类型给几个像样的追问。问不出问题的时候，这几个按钮就是入口 */
-function suggestionsFor(type: string): string[] {
-  if (type === 'trainer') return ['显存不够怎么办', '为什么这么慢', '学习率怎么定'];
-  if (type === 'advantage' || type === 'rloo' || type === 'gae') return ['优势为什么是 0', '组要开多大'];
-  if (type === 'traj_filter') return ['为什么连线锁着', '会不会错位'];
-  if (type === 'multi_turn_rollout' || type === 'rollout') return ['为什么这么慢', '轮数怎么定'];
-  return ['这个节点是干什么的', '参数怎么调'];
-}
-
-/** 输出块渲染。分块的意义就在这里——每种块长得不一样，扫一眼就知道在看什么 */
-function OutputView({ output }: { output: NodeOutput }) {
-  return (
-    <div className="flex flex-col gap-3.5">
-      <div
-        className={cn(
-          'rounded-[10px] border px-3 py-2.5 text-[12.5px] leading-[19px]',
-          output.error
-            ? 'border-red-200 bg-red-50 text-red-700'
-            : 'bg-secondary border-border text-foreground',
-        )}
-      >
-        {output.error ?? output.summary}
-      </div>
-
-      {output.blocks.map((b, i) => (
-        <Block key={i} block={b} />
-      ))}
-    </div>
-  );
-}
-
-function Block({ block }: { block: OutputBlock }) {
-  const title = block.title && (
-    <div className="text-muted-foreground mb-1.5 text-xs">{block.title}</div>
-  );
-
-  if (block.kind === 'kv') {
-    return (
-      <div>
-        {title}
-        <div className="flex flex-col">
-          {block.rows.map(([k, v], i) => (
-            <div
-              key={`${k}-${i}`}
-              className={cn(
-                'flex gap-2.5 py-[5px] text-[12.5px]',
-                i !== block.rows.length - 1 && 'border-border/60 border-b',
-              )}
-            >
-              <span className="text-muted-foreground min-w-30 flex-none">{k}</span>
-              <span className="text-foreground min-w-0 flex-1 break-all">{v}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (block.kind === 'text') {
-    return (
-      <div>
-        {title}
-        <pre className="bg-muted text-foreground overflow-x-auto rounded-[10px] px-3 py-2.5 font-mono text-[11.5px] leading-[18px]">
-          {block.body}
-        </pre>
-      </div>
-    );
-  }
-
-  if (block.kind === 'dist') {
-    const max = Math.max(...block.bars.map((b) => b.value), 0.0001);
-    return (
-      <div>
-        {title}
-        <div className="flex flex-col gap-1.5">
-          {block.bars.map((b) => (
-            <div key={b.label} className="flex items-center gap-2">
-              <span className="text-muted-foreground min-w-14 flex-none text-[11.5px]">
-                {b.label}
-              </span>
-              <span className="bg-border h-2 flex-1 overflow-hidden rounded-full">
-                <span
-                  className={cn(
-                    'block h-full rounded-full',
-                    /* 方差为 0 的那种情况要一眼看出来，所以零值给个红点宽度 */
-                    b.value === 0 ? 'min-w-[3px] bg-red-500' : 'bg-primary',
-                  )}
-                  style={{ width: `${(b.value / max) * 100}%` }}
-                />
-              </span>
-              <span className="text-muted-foreground min-w-8 flex-none text-end text-[11.5px]">
-                {b.value.toFixed(2)}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      {title}
-      <LogViewer lines={block.lines} height={196} follow={false} />
-    </div>
-  );
+function suggestionsFor(type: string): MessageKey[] {
+  if (type === 'train_step') return ['wf.sugOom', 'wf.sugSlow', 'wf.sugLr'];
+  if (type === 'streaming_driver') return ['wf.sugStaleness', 'wf.sugRewardWire', 'wf.sugBatchFill'];
+  if (type === 'advantage') return ['wf.sugGae', 'wf.sugQuad', 'wf.sugTeacherWire'];
+  if (type === 'select') return ['wf.sugSelect', 'wf.sugSurvivors'];
+  if (type === 'rollout' || type === 'generate') return ['wf.sugSlow', 'wf.sugTurns'];
+  return ['wf.sugWhatIs', 'wf.sugHowToTune'];
 }

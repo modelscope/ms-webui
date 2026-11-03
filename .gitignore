@@ -155,3 +155,6 @@ megatron_output/
 
 # ast template
 ast_index_file.py
+
+# skills are fetched at build time (scripts/fetch-skills.mjs), not committed
+webui/public/skills/

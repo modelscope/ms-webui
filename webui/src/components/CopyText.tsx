@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { cn } from 'cn';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { useT } from '@/i18n';
 
 /**
  * 复制按钮。取代 antd 的 Typography.Text copyable。
@@ -15,8 +16,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
  * 单独导出是因为复制这个动作有两种长相：跟在文本后面（CopyText），
  * 和单独浮在代码块右上角（CodeBlock）。行为只应该有一份实现。
  */
-export function CopyButton({ text, label = '复制' }: { text: string; label?: string }) {
+export function CopyButton({ text, label }: { text: string; label?: string }) {
   const [done, setDone] = useState(false);
+  const { t } = useT();
+  const l = label ?? t('copy.copy');
 
   const copy = async (e: React.MouseEvent) => {
     /* 这个按钮经常落在整行可点的列表行里，不拦住就会连带跳转 */
@@ -36,14 +39,14 @@ export function CopyButton({ text, label = '复制' }: { text: string; label?: s
       <TooltipTrigger asChild>
         <button
           type="button"
-          aria-label={label}
+          aria-label={l}
           onClick={copy}
           className="text-muted-foreground/60 hover:text-foreground shrink-0 cursor-pointer transition-colors"
         >
           {done ? <Check size={12} className="text-state-done" /> : <Copy size={12} />}
         </button>
       </TooltipTrigger>
-      <TooltipContent>{done ? '已复制' : label}</TooltipContent>
+      <TooltipContent>{done ? t('copy.copied') : l}</TooltipContent>
     </Tooltip>
   );
 }

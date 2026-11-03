@@ -3,12 +3,11 @@ import { cn } from 'cn';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 /**
- * 深色外壳（标题栏 / 侧栏 / tips 条）上的无框图标按钮。
+ * 外壳（标题栏 / 侧栏 / tips 条）上的无框图标按钮。
  *
  * 不直接用 shadcn 的 Button variant="ghost"：那个 variant 的 hover 是 bg-accent，
- * 而 accent 属于内容区那套浅色语义，落在深色外壳上会变成一块白斑。
- * 外壳区域必须走 sidebar-* 这组变量，所以单独收一个组件，
- * 让「深色底上的 hover 反馈长什么样」只有这一处定义。
+ * 属于内容区那套语义；外壳区域必须走 sidebar-* 这组变量，单独收一个组件，
+ * 让「外壳上的 hover 反馈长什么样」只有这一处定义。
  */
 export function ChromeIconButton({
   icon,

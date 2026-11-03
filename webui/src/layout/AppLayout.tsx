@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Outlet } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { Titlebar } from './Titlebar';
@@ -16,6 +16,22 @@ import { useSettings } from '@/settings/SettingsContext';
 export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
   const { settings, tipsDismissed } = useSettings();
+
+  /* 主题接线：.dark 挂在 <html> 上（index.css 的 @custom-variant 与 .dark 变量块
+   * 都读它）。system 态订阅 prefers-color-scheme，系统切换实时生效 */
+  useEffect(() => {
+    const root = document.documentElement;
+    const apply = (dark: boolean) => root.classList.toggle('dark', dark);
+    if (settings.theme !== 'system') {
+      apply(settings.theme === 'dark');
+      return;
+    }
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    apply(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => apply(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, [settings.theme]);
 
   const tipsVisible = settings.tipsEnabled && !tipsDismissed;
 
