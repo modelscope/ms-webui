@@ -1,4 +1,4 @@
-<h1 align="center">ms-webui: Web workbench for ms-swift</h1>
+<h1 align="center">ms-webui: Web workbench for one-stack LLM training and auto research</h1>
 
 <p align="center">
     <img src="webui/public/ms-webui5.png" width="360"/>

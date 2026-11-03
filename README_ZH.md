@@ -1,4 +1,4 @@
-<h1 align="center">ms-webui: ms-swift 的网页工作台</h1>
+<h1 align="center">ms-webui: 一栈式 LLM 训练与自动研究的网页工作台</h1>
 
 <p align="center">
     <img src="webui/public/ms-webui5.png" width="360"/>
