@@ -51,6 +51,7 @@ import { runAgentLoop } from '@/agent/runAgentLoop';
 import { compressHistory, moveSummaries, removeSummaries } from '@/agent/history';
 import { useApproval } from '@/agent/useApproval';
 import { buildSkillsSystem, listSkills } from '@/api/skills';
+import { fsTool } from '@/api/tools';
 import { resolvePersona } from '@/store/systemPrompts';
 import { useSettings } from '@/settings/SettingsContext';
 
@@ -1155,6 +1156,23 @@ export function ChatPage() {
     const { base: basePrompt, research: researchPrompt } = resolvePersona(settings.systemPrompts);
     const persona = (code ? researchPrompt : basePrompt).trim();
 
+    /*
+     * 踩坑教训常驻注入（研究/代码模式）：workspace/EXPERIMENTS.md 头部 60 行
+     * （条目约定 prepend 在文件头，最新在前）。跨会话的失败根因不靠模型记忆、
+     * 也不靠对话摘要——摘要有损，而 system 注入每轮原样在场（compressHistory
+     * 只压对话本体）。文件不存在则静默跳过：第一次踩坑后由指引教模型建它。
+     */
+    let lessonsSystem = '';
+    if (code || research) {
+      try {
+        const r = await fsTool({ op: 'read', path: 'EXPERIMENTS.md', root: 'workspace', limit: 60 });
+        const c = (r.content ?? '').trim();
+        if (c) lessonsSystem = `## 过往实验与踩坑记录（workspace/EXPERIMENTS.md 头部，最新在前；更早的条目用 read_file 读全文件）\n${c}`;
+      } catch {
+        /* 文件不存在或不可读：没有教训可注入 */
+      }
+    }
+
     try {
       await Promise.all(
         targets.map(async (modelId) => {
@@ -1177,6 +1195,8 @@ export function ChatPage() {
             ...(code ? [{ role: 'system' as const, content: RESEARCH_GUIDANCE }] : []),
             /* autoresearch 指引：研究模式（访谈阶段）或会话已绑定研究会话（循环阶段）时常驻 */
             ...(code || research ? [{ role: 'system' as const, content: AUTORESEARCH_GUIDE }] : []),
+            /* 踩坑教训文件头部（同上常驻；内容为空时不注入） */
+            ...(lessonsSystem ? [{ role: 'system' as const, content: lessonsSystem }] : []),
             { role: 'system' as const, content: HOME_SYSTEM },
             /* 工作台行动指引：swift 用法/数据集入口/模型选型/算力分片的正确路标 */
             { role: 'system' as const, content: WORKBENCH_GUIDE },

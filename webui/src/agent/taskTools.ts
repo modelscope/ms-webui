@@ -1,9 +1,9 @@
 import { defineTool, type AgentTool, type ToolContext } from './tools';
 import type { PrefillModule, PrefillPayload } from '@/store/prefill';
-import { listTrains, renameTrain, startTrain, stopTrain, trainTaskLabel } from '@/api/train';
-import { listEvals, renameEval, stopEval } from '@/api/eval';
-import { listExports, renameExport, stopExport } from '@/api/export';
-import { listDeploys, renameDeploy, stopDeploy } from '@/api/deploy';
+import { getTrainLog, listTrains, renameTrain, startTrain, stopTrain, trainTaskLabel } from '@/api/train';
+import { getEvalLog, listEvals, renameEval, stopEval } from '@/api/eval';
+import { getExportLog, listExports, renameExport, stopExport } from '@/api/export';
+import { getDeployLog, listDeploys, renameDeploy, stopDeploy } from '@/api/deploy';
 
 /**
  * 首页（对话页）的任务工具集：创建四类任务、批量启动消融实验、列出现有任务、停止任务。
@@ -430,7 +430,16 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
           );
         } else if (type === 'eval') {
           const tasks = await listEvals();
-          lines.push(...tasks.map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.modelId}`));
+          /* 事实 + 建议动作同包：完成态带逐集分数与报告路径，对账不用翻研究页 */
+          lines.push(
+            ...tasks.map((t) => {
+              const head = `- ${t.id} · ${t.status} · ${t.name ?? t.modelId}`;
+              const scores = (t.report ?? [])
+                .map((r) => `${r.dataset}: ${r.rows.find((x) => x.score !== undefined)?.score ?? '?'}`)
+                .join('，');
+              return scores ? `${head} · ${scores}（报告 ${t.resultJsonl}）` : head;
+            }),
+          );
         } else if (type === 'export') {
           const tasks = await listExports();
           lines.push(...tasks.map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.model}`));
@@ -446,6 +455,57 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
       return lines.length
         ? `${type} 任务 ${lines.length} 个：\n${lines.join('\n')}`
         : `没有 ${type} 任务。`;
+    },
+  );
+
+  /*
+   * 按需读任务日志：事件里只嵌尾几行，失败归因要深读时从这里拿。四类任务
+   * 的 /log 端点同形态（环形缓冲，截尾 500 行）；脚本任务已有专用
+   * read_script_log，不重复覆盖。
+   */
+  const readTaskLog = defineTool(
+    {
+      type: 'function',
+      function: {
+        name: 'read_task_log',
+        description:
+          '按需读一个任务的执行日志尾部（训练/评测/导出/部署；脚本任务用 read_script_log）。' +
+          '失败归因深读用——唤醒事件里只嵌尾几行，这里能看全部保留行',
+        parameters: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', enum: ['train', 'eval', 'export', 'deploy'], description: '任务类型' },
+            id: { type: 'string', description: '任务 id（list_tasks 给出的那个）' },
+            tail: { type: 'integer', description: '读最近多少行（默认 50，上限 500）' },
+          },
+          required: ['type', 'id'],
+        },
+      },
+    },
+    async (args) => {
+      const type = String(args.type ?? '');
+      const id = String(args.id ?? '').trim();
+      if (!id) return '缺少任务 id；先用 list_tasks 核对。';
+      const tail = Math.min(Math.max(Number(args.tail) || 50, 1), 500);
+      try {
+        const lines =
+          type === 'train'
+            ? await getTrainLog(id)
+            : type === 'eval'
+              ? await getEvalLog(id)
+              : type === 'export'
+                ? await getExportLog(id)
+                : type === 'deploy'
+                  ? await getDeployLog(id)
+                  : null;
+        if (!lines) return `未知任务类型: ${type}`;
+        const slice = lines.slice(-tail);
+        return slice.length
+          ? `${type} 任务 ${id} 日志最近 ${slice.length}/${lines.length} 行：\n${slice.join('\n')}`
+          : `${type} 任务 ${id} 日志为空（可能刚创建，或收编恢复中）。`;
+      } catch (e) {
+        return `日志读取失败: ${String(e)}`;
+      }
     },
   );
 
@@ -494,7 +554,7 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
     },
   );
 
-  return [createTrain, startTrainBatch, createEval, createExport, createDeploy, listTasks, deleteTask];
+  return [createTrain, startTrainBatch, createEval, createExport, createDeploy, listTasks, readTaskLog, deleteTask];
 }
 
 /*
@@ -526,7 +586,13 @@ export function moduleTaskTools(module: 'train' | 'eval' | 'export' | 'deploy'):
           module === 'train'
             ? (await listTrains()).map((t) => `- ${t.id} · ${t.status} · ${trainTaskLabel(t)}`)
             : module === 'eval'
-              ? (await listEvals()).map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.modelId}`)
+              ? (await listEvals()).map((t) => {
+                  const head = `- ${t.id} · ${t.status} · ${t.name ?? t.modelId}`;
+                  const scores = (t.report ?? [])
+                    .map((r) => `${r.dataset}: ${r.rows.find((x) => x.score !== undefined)?.score ?? '?'}`)
+                    .join('，');
+                  return scores ? `${head} · ${scores}（报告 ${t.resultJsonl}）` : head;
+                })
               : module === 'export'
                 ? (await listExports()).map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.model}`)
                 : (await listDeploys()).map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.servedName}`);

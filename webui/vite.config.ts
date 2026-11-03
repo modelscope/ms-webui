@@ -2458,7 +2458,7 @@ async function watchResearchTrain(session: ResearchSession): Promise<void> {
     await pushResearchEvent(
       session.id,
       'train-failed',
-      `迭代 ${it.index} 训练失败：\n${tail}\n\n先用 list_checkpoints 查断点，倾向 --resume_from_checkpoint 续跑；连续失败或无断点时停止并上报用户。${remoteHint}`,
+      `迭代 ${it.index} 训练失败：\n${tail}\n\n嵌的是日志尾 8 行，不够用 read_task_log 深读；先 list_checkpoints 查断点，倾向 --resume_from_checkpoint 续跑；连续失败或无断点时停止并上报用户。${remoteHint}`,
     );
     await mutateResearch(session.id, (s) => {
       s.status = 'deciding';
@@ -2595,7 +2595,7 @@ async function watchResearchEval(session: ResearchSession): Promise<void> {
     await pushResearchEvent(
       session.id,
       'eval-failed',
-      `迭代 ${it.index} 评测失败：\n${tail}\n\n分析失败原因（样本量？数据格式？）后决定重评或调整方案。`,
+      `迭代 ${it.index} 评测失败：\n${tail}\n\n嵌的是日志尾 8 行，不够用 read_task_log 深读；分析失败原因（样本量？数据格式？）后决定重评或调整方案。`,
     );
     await mutateResearch(session.id, (s) => {
       s.status = 'deciding';
@@ -2636,7 +2636,7 @@ async function finalizeResearchIteration(
     await pushResearchEvent(
       session.id,
       'pass',
-      `${label}：${session.evalPlan.metric.metricName} = ${score}${delta}，达到阈值 ${session.evalPlan.threshold}。研究达标——总结成果（最终 checkpoint 路径、各轮分数、数据版本谱系）给用户，并用 update_research 置 done。`,
+      `${label}：${session.evalPlan.metric.metricName} = ${score}${delta}，达到阈值 ${session.evalPlan.threshold}。研究达标——总结成果（最终 checkpoint 路径、各轮分数、数据版本谱系）给用户；可用 deploy_checkpoint 把最佳 checkpoint 直接部署成可对话服务（LoRA 免合并）或 export_checkpoint 固化/推 Hub，并用 update_research 置 done。`,
     );
     await mutateResearch(session.id, (s) => {
       s.status = 'done';

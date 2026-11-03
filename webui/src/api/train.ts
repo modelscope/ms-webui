@@ -165,6 +165,7 @@ export async function renameTrain(id: string, name: string): Promise<void> {
   if (!res.ok) throw new Error((await res.json()).error ?? tStatic('api.renameFailed'));
 }
 
+/** 执行日志的环形缓冲尾部（与 eval/export/deploy 的 /log 端点同形态） */
 export async function getTrainLog(id: string): Promise<string[]> {
   const res = await fetch(`/api/train/${encodeURIComponent(id)}/log`);
   if (!res.ok) throw new Error(tStatic('api.readLogFailed', { status: res.status }));

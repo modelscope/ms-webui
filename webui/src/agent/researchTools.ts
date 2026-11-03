@@ -6,6 +6,8 @@ import {
   type ResearchTrainConfig,
 } from '@/api/research';
 import { installChallenger, listChallengers } from '@/api/challenger';
+import { startDeploy } from '@/api/deploy';
+import { startExport } from '@/api/export';
 import { pruneCheckpoints, startTrain } from '@/api/train';
 import { defineTool, type AgentTool } from './tools';
 
@@ -40,8 +42,9 @@ export const AUTORESEARCH_GUIDE = [
   '- 每轮迭代用 update_research 记 note（改了什么、为什么）并维护 iterations 数组（index/dataVersion/trainTaskId/score 原样带回再加新条目）。事件文本里带的账本信息以服务端为准，改动前先读最新 session。',
   '- metric 用自建判分（metric_kind=custom）时：训练完成事件会把评测交还给你——对最新 checkpoint 用 run_script 跑自己的判分脚本（脚本完成会自动通知），分数写进该迭代的 score，达标与否由你对照阈值判断；evalscope 基准则由平台自动起评。',
   '- Challenger 数据生成组件优先：list_challengers 看可用组件，install_challenger 装进工作空间后 run_script 跑（带参）；不合适才 read_file 读组件源码、edit_file 继承改写。护栏不可拆：评测集冻结（生成组件绝不读评测数据）；新数据必须落新版本目录；生成数据过行级校验才进训练。',
-  '- 训练失败/失联先 list_checkpoints 查断点，倾向 --resume_from_checkpoint 续跑（start_train 的 params 里传 resume_from_checkpoint=<ckpt 绝对路径>）；连续失败或无断点停止并上报。',
-  '- 上报与收工同样走对话：达标总结（最终 checkpoint 路径、各轮分数、数据版本谱系）；预算耗尽给出判断（数据问题还是方案上限）。研究随时可在「研究」页停止。',
+  '- 踩坑与结论沉淀进 workspace/EXPERIMENTS.md：排障确认根因后把「现象/根因/修法」三行 prepend 到文件头（先读再整写或 edit_file 顶部插入），研究收口时把实验结论（数据版本×分数×取舍）也补记——该文件头部会常驻注入你的上下文、跨研究跨会话生效，开新迭代前先看它避免重蹈已修过的坑。',
+  '- 训练失败/失联先 list_checkpoints 查断点，倾向 --resume_from_checkpoint 续跑（start_train 的 params 里传 resume_from_checkpoint=<ckpt 绝对路径>）；事件里嵌的日志尾不够用时 read_task_log 深读归因；连续失败或无断点停止并上报。',
+  '- 上报与收工同样走对话：达标总结（最终 checkpoint 路径、各轮分数、数据版本谱系），并可用 deploy_checkpoint 把最佳 checkpoint 直接部署成可对话服务（LoRA 免合并，就绪后对话页即可与它对话）或 export_checkpoint 固化/推 Hub；预算耗尽给出判断（数据问题还是方案上限）。研究随时可在「研究」页停止。',
 ].join('\n');
 
 /** autoresearch 工具集（首页研究模式挂载；conv/model 来自当前会话与所选模型列） */
@@ -474,5 +477,156 @@ export function researchTools(conv: string, model: string): AgentTool[] {
     },
   );
 
-  return [create, update, checkpoints, pruneCheckpointsTool, startTrainTool, listChallengerTool, installChallengerTool];
+  /*
+   * 研究收口工具（达标后）：deploy 让最佳 checkpoint 直接变成可对话的服务
+   * （LoRA 以 adapter 挂载、免合并），export 把它固化成完整模型（merge /
+   * 量化 / 推 Hub）。研究产出从「报告一段文字」变成「可分享的模型」。
+   * 与 start_train 同一套审批门（勾「总是允许」后免审批）。
+   */
+  const deployCheckpoint = defineTool(
+    {
+      type: 'function',
+      function: {
+        name: 'deploy_checkpoint',
+        description:
+          '把训练产出的 checkpoint 部署成可对话的服务：LoRA checkpoint 直接以 adapter 挂载（免合并），' +
+          'full checkpoint 直接作为模型加载。就绪后 endpoint 自动登记进模型配置，对话页立即可与它对话（质化抽查也由此做）。' +
+          '执行前需用户审批',
+        parameters: {
+          type: 'object',
+          properties: {
+            checkpoint: { type: 'string', description: 'checkpoint 目录的绝对路径（list_checkpoints 给出的）' },
+            session_id: { type: 'string', description: '研究会话 id（取底座模型与 tuner 形态；研究收口部署用它）' },
+            model: { type: 'string', description: '底座模型（LoRA adapter 的母模型）；缺省用会话 base_model' },
+            served_name: { type: 'string', description: '服务名（登记进模型配置的名字；缺省自动生成）' },
+            engine: { type: 'string', enum: ['vllm', 'sglang'], description: '推理引擎（默认 vllm）' },
+            gpus: { type: 'array', items: { type: 'integer' }, description: '本机卡号；不传不限制' },
+          },
+          required: ['checkpoint'],
+        },
+      },
+    },
+    async (args, ctx) => {
+      try {
+        const ckpt = str(args.checkpoint);
+        if (!ckpt) return '缺 checkpoint 路径（list_checkpoints 给出）。';
+        let base = str(args.model);
+        let isFull = false;
+        const sessionId = str(args.session_id);
+        if (sessionId) {
+          const s = await getResearch(sessionId);
+          base = base || s.baseModel;
+          isFull = s.trainConfig?.tuner === 'full';
+        }
+        if (!isFull && !base) return 'LoRA checkpoint 部署需要底座模型：传 model 或 session_id。';
+        const command = 'deploy_checkpoint';
+        if (!ctx.allowedCommands?.has(command)) {
+          const ok = await ctx.requestApproval(
+            '部署 checkpoint 为可对话服务',
+            `${isFull ? ckpt : `${base} + adapter ${ckpt}`} · ${args.engine === 'sglang' ? 'sglang' : 'vllm'}`,
+            command,
+          );
+          if (!ok) return '用户拒绝了这次部署。确认顾虑（占卡？服务名？）后再试或放弃。';
+        }
+        const id = await startDeploy({
+          ...(isFull ? { model: ckpt } : { model: base, adapters: [ckpt] }),
+          ...(str(args.served_name) ? { servedName: str(args.served_name) } : {}),
+          engine: args.engine === 'sglang' ? 'sglang' : 'vllm',
+          ...(Array.isArray(args.gpus)
+            ? { gpus: args.gpus.map(Number).filter((n: number) => Number.isInteger(n) && n >= 0) }
+            : {}),
+        });
+        return [
+          `部署任务 ${id} 已启动。就绪后 endpoint 自动登记进模型配置，对话页直接可与它对话。`,
+          `启动有过程：read_task_log(type='deploy', id='${id}') 看就绪进度，list_tasks(type='deploy') 看状态。`,
+        ].join('\n');
+      } catch (e) {
+        return String(e instanceof Error ? e.message : e);
+      }
+    },
+  );
+
+  const exportCheckpoint = defineTool(
+    {
+      type: 'function',
+      function: {
+        name: 'export_checkpoint',
+        description:
+          '把研究产出的 checkpoint 固化成完整模型：LoRA 合并进底座（merge），full 训练直接整理导出；' +
+          '可选量化与推送 ModelScope Hub。研究收口的可分享交付物。执行前需用户审批',
+        parameters: {
+          type: 'object',
+          properties: {
+            checkpoint: { type: 'string', description: 'checkpoint 目录的绝对路径（list_checkpoints 给出的）' },
+            session_id: { type: 'string', description: '研究会话 id（取底座模型与 tuner 形态）' },
+            model: { type: 'string', description: '底座模型（LoRA 合并的母模型）；缺省用会话 base_model' },
+            quant_method: { type: 'string', enum: ['awq', 'gptq', 'bnb'], description: '量化方式（不传=不量化）' },
+            push_to_hub: { type: 'boolean', description: '完成后推送 ModelScope Hub（需 hub_model_id）' },
+            hub_model_id: { type: 'string', description: '推送目标 repo id' },
+            gpus: { type: 'array', items: { type: 'integer' }, description: '本机卡号（合并/量化是 GPU 作业）；不传不限制' },
+          },
+          required: ['checkpoint'],
+        },
+      },
+    },
+    async (args, ctx) => {
+      try {
+        const ckpt = str(args.checkpoint);
+        if (!ckpt) return '缺 checkpoint 路径（list_checkpoints 给出）。';
+        let base = str(args.model);
+        let isFull = false;
+        const sessionId = str(args.session_id);
+        if (sessionId) {
+          const s = await getResearch(sessionId);
+          base = base || s.baseModel;
+          isFull = s.trainConfig?.tuner === 'full';
+        }
+        if (!isFull && !base) return 'LoRA 合并需要底座模型：传 model 或 session_id。';
+        const pushToHub = args.push_to_hub === true;
+        const hubModelId = str(args.hub_model_id);
+        if (pushToHub && !hubModelId) return '勾了 push_to_hub 但缺 hub_model_id。';
+        const command = 'export_checkpoint';
+        if (!ctx.allowedCommands?.has(command)) {
+          const ok = await ctx.requestApproval(
+            '导出 checkpoint 为完整模型',
+            `${isFull ? `full 权重整理：${ckpt}` : `合并 LoRA：${base} + ${ckpt}`}` +
+              `${args.quant_method ? ` · 量化 ${args.quant_method}` : ''}${pushToHub ? ` · 推送 ${hubModelId}` : ''}`,
+            command,
+          );
+          if (!ok) return '用户拒绝了这次导出。确认顾虑（磁盘？repo 名？）后再试或放弃。';
+        }
+        const id = await startExport({
+          model: isFull ? ckpt : base,
+          ...(isFull ? {} : { adapters: ckpt }),
+          mergeLora: !isFull,
+          ...(args.quant_method === 'awq' || args.quant_method === 'gptq' || args.quant_method === 'bnb'
+            ? { quantMethod: args.quant_method }
+            : {}),
+          pushToHub,
+          ...(hubModelId ? { hubModelId } : {}),
+          ...(Array.isArray(args.gpus)
+            ? { gpus: args.gpus.map(Number).filter((n: number) => Number.isInteger(n) && n >= 0) }
+            : {}),
+        });
+        return [
+          `导出任务 ${id} 已启动${isFull ? '（full 权重整理）' : '（LoRA 合并）'}。`,
+          '完成后产物在导出页可见（list_tasks(type=export) 看状态）；失败用 read_task_log(type=export) 深读原因。',
+        ].join('\n');
+      } catch (e) {
+        return String(e instanceof Error ? e.message : e);
+      }
+    },
+  );
+
+  return [
+    create,
+    update,
+    checkpoints,
+    pruneCheckpointsTool,
+    startTrainTool,
+    listChallengerTool,
+    installChallengerTool,
+    deployCheckpoint,
+    exportCheckpoint,
+  ];
 }
