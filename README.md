@@ -64,8 +64,8 @@ npm run dev
 ## Features
 
 - **Training**: creation form with parallelism planning and memory estimation,
-  live output log, loss / lr curves from `metrics.jsonl`, and a comparison page
-  across runs.
+  live output log, loss / lr curves parsed from the training log in real time,
+  and a comparison page across runs.
 - **Evaluation, export, deployment**: the same create / list / detail pattern;
   a deployment is an attached `swift deploy` process, and once ready its
   endpoint is registered in the model configuration and selectable in chat.
