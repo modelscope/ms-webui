@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { TaskDetailShell, MetaCell, Panel, StatCell } from '@/components/TaskDetailShell';
 import { LogViewer } from '@/components/LogViewer';
 import { LineChart } from '@/components/charts/LineChart';
@@ -10,7 +11,8 @@ import { useSettings } from '@/settings/SettingsContext';
 import { logo } from '@/theme/theme';
 import type { TaskItem } from '@/mock/types';
 import {
-  getTrainLog, listTrains, renameTrain, stopTrain, trainCreateCommand, trainTaskLabel,
+  getTrainLog, listTrainCheckpoints, listTrains, renameTrain, startTrain, stopTrain,
+  trainCreateCommand, trainTaskLabel,
   type TrainTaskInfo,
 } from '@/api/train';
 import { useT } from '@/i18n';
@@ -44,6 +46,7 @@ function toTaskItem(t: TrainTaskInfo): TaskItem {
 export function TrainDetailPage({ tab }: { tab: 'metrics' | 'log' }) {
   const { t } = useT();
   const { id } = useParams();
+  const navigate = useNavigate();
   /* 页面 AI 助手：任务管理工具（列出/停止/删除/重命名），入口在页头 Bot 按钮 */
   const [assistantOpen, setAssistantOpen] = useState(false);
   const { settings } = useSettings();
@@ -88,6 +91,42 @@ export function TrainDetailPage({ tab }: { tab: 'metrics' | 'log' }) {
   const task = info ? toTaskItem(info) : undefined;
   const metrics = info?.metrics ?? [];
   const last = metrics.at(-1);
+
+  /*
+   * 一键续跑：取最新断点，以原任务同参数 + resume_from_checkpoint 起新任务
+   * （parentTaskId 把血缘指回原任务）。代码形态没有结构化参数可复用，不提供。
+   */
+  const resumeFromCheckpoint = useCallback(
+    async (taskId: string) => {
+      const { resumeFrom } = await listTrainCheckpoints(taskId);
+      if (!resumeFrom) {
+        toast.error(t('tdl.resumeNoCheckpoint'));
+        return;
+      }
+      const source = infos.find((x) => x.id === taskId);
+      if (!source || source.taskType === 'code') {
+        toast.error(t('tdl.resumeCodeUnsupported'));
+        return;
+      }
+      const newId = await startTrain({
+        model: source.model,
+        datasets: source.datasets,
+        taskType: source.taskType,
+        ...(source.valDatasets?.length ? { valDatasets: source.valDatasets } : {}),
+        tuner: source.tuner,
+        ...(source.plugins.length ? { plugins: source.plugins } : {}),
+        ...(source.gpus?.length ? { gpus: source.gpus } : {}),
+        ...(source.gpuCount ? { gpuCount: source.gpuCount } : {}),
+        params: { ...source.params, resume_from_checkpoint: resumeFrom },
+        ...(source.watchMetrics?.length ? { watchMetrics: source.watchMetrics } : {}),
+        ...(source.extraArgs ? { extraArgs: source.extraArgs } : {}),
+        parentTaskId: taskId,
+      });
+      toast.success(t('tdl.resumeStarted'));
+      navigate(`/train/${newId}/metrics`);
+    },
+    [infos, navigate, t],
+  );
 
   const pct = info?.totalSteps ? Math.round(((info.step ?? 0) / info.totalSteps) * 100) : 0;
 
@@ -215,6 +254,12 @@ export function TrainDetailPage({ tab }: { tab: 'metrics' | 'log' }) {
                 await stopTrain(id);
                 await refresh();
               }
+            : undefined
+        }
+        /* 续跑：失败/被停的 CLI 形态任务才传（shell 侧非 RUNNING 即显示按钮） */
+        onResume={
+          id && info && (info.status === 'failed' || info.status === 'stopped') && info.taskType !== 'code'
+            ? resumeFromCheckpoint
             : undefined
         }
       />

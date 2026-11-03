@@ -269,10 +269,30 @@ export function researchTools(conv: string, model: string): AgentTool[] {
           `/api/train/${encodeURIComponent(str(args.train_task_id))}/checkpoints`,
         );
         if (!res.ok) return `读取失败: ${(await res.json().catch(() => ({}))).error ?? res.status}`;
-        const { checkpoints } = (await res.json()) as { checkpoints: Array<{ name: string; mtimeMs: number }> };
-        return checkpoints.length
-          ? checkpoints.map((c) => `- ${c.name}`).join('\n')
-          : '（还没有 checkpoint——检查 save_steps/save_strategy 配置或训练是否已跑到保存点）';
+        const { checkpoints, resumeFrom, remote, warning } = (await res.json()) as {
+          checkpoints: Array<{ name: string; path: string; mtimeMs: number }>;
+          resumeFrom?: string;
+          remote?: boolean;
+          warning?: string;
+        };
+        if (remote && !checkpoints.length) {
+          return warning ?? '远端形态训练：checkpoint 在 server 侧，本机不可枚举。';
+        }
+        if (!checkpoints.length) {
+          return '（还没有 checkpoint——检查 save_steps/save_strategy 配置或训练是否已跑到保存点）';
+        }
+        /* 事实 + 建议动作同包返回：清单带路径与年龄，末尾附可直接复制的续跑模板 */
+        const now = Date.now();
+        const lines = checkpoints.map((c) => {
+          const days = (now - c.mtimeMs) / 86_400_000;
+          const age = days >= 1 ? `（${Math.floor(days)} 天前）` : '';
+          return `- ${c.name}  ${c.path}${age}`;
+        });
+        const hint = resumeFrom
+          ? `\n最新断点可直接续跑：start_train 的 params 里传 resume_from_checkpoint=${resumeFrom}` +
+            '（或 CLI --resume_from_checkpoint 同值）。'
+          : '';
+        return `${lines.join('\n')}${hint}${remote ? `\n${warning ?? ''}` : ''}`;
       } catch (e) {
         return String(e instanceof Error ? e.message : e);
       }

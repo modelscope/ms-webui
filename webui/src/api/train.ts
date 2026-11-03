@@ -48,6 +48,8 @@ export interface TrainTaskInfo {
   outputDir: string;
   /** 创建时拼好的完整 spawn 参数——createCommand 直接由它重建 */
   args: string[];
+  /** 续跑血缘：从哪个任务的 checkpoint 恢复（一键续跑/研究迭代传入） */
+  parentTaskId?: string;
   status: 'running' | 'done' | 'failed' | 'stopped';
   startedAt: string;
   step?: number;
@@ -82,6 +84,8 @@ export async function startTrain(input: {
    */
   watchMetrics?: string[];
   extraArgs?: string;
+  /** 续跑血缘：从哪个任务的 checkpoint 恢复（一键续跑/研究迭代传入） */
+  parentTaskId?: string;
 }): Promise<string> {
   const res = await fetch('/api/train', {
     method: 'POST',
@@ -115,6 +119,29 @@ export async function startCodeTrain(input: {
 export async function stopTrain(id: string): Promise<void> {
   const res = await fetch(`/api/train/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.stopFailed', { status: res.status }));
+}
+
+/** checkpoint 条目：path 为绝对路径（resume 直接用）；remote 任务本机通常枚举不到 */
+export interface TrainCheckpoint {
+  name: string;
+  mtimeMs: number;
+  path: string;
+}
+
+export interface TrainCheckpointsInfo {
+  checkpoints: TrainCheckpoint[];
+  /** 最新断点的绝对路径（无 checkpoint 时缺省）——一键续跑与 agent 共用 */
+  resumeFrom?: string;
+  /** 远端形态：ckpt 在 server 侧不可枚举，warning 说明回收风险 */
+  remote?: boolean;
+  warning?: string;
+}
+
+/** 断点清单 + 最新断点（续跑事实源）；不存在的任务 404 抛错 */
+export async function listTrainCheckpoints(id: string): Promise<TrainCheckpointsInfo> {
+  const res = await fetch(`/api/train/${encodeURIComponent(id)}/checkpoints`);
+  if (!res.ok) throw new Error(tStatic('api.loadFailed', { status: res.status }));
+  return (await res.json()) as TrainCheckpointsInfo;
 }
 
 /** 重命名：只改 webui 里的显示名，不触碰任务本体与输出目录 */

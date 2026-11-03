@@ -184,6 +184,8 @@ export const en: Partial<MessageTable> = {
   'task.pauseDemo': 'Pause (demo, backend not wired)',
   'task.resumeHint': 'Starts a new client with the same adapter_name for lossless resume',
   'task.resumeDemo': 'Resume (demo, backend not wired)',
+  'task.resumeFrom': 'Resume from checkpoint',
+  'task.resumeFromHint': 'Starts a new task with the same params plus --resume_from_checkpoint at the latest checkpoint (lineage points back to this task)',
   'task.stop': 'Stop',
   'task.stopHint': 'Sends SIGTERM first so it can save checkpoints; escalates to SIGKILL on timeout.',
   'task.sigtermHint': 'Graceful SIGTERM shutdown of the service and child processes',
@@ -608,6 +610,9 @@ export const en: Partial<MessageTable> = {
   'tdl.showAll': ' Showing every metric seen in the logs.',
   'tdl.metricsTab': 'Metrics',
   'tdl.outputDir': 'Output directory',
+  'tdl.resumeNoCheckpoint': 'No checkpoint to resume from (check save_steps / save_strategy first)',
+  'tdl.resumeCodeUnsupported': 'Code-mode tasks have no structured params to replay; resume is not offered',
+  'tdl.resumeStarted': 'Resumed from the latest checkpoint as a new task',
   'tdl.progressMeta': 'Progress',
   'tdl.sourceModel': 'Base model',
 

@@ -186,6 +186,7 @@ export function TaskDetailShell({
   onStop,
   stopTooltip,
   onAssistant,
+  onResume,
 }: {
   module: ModuleMeta;
   tasks: TaskItem[];
@@ -205,6 +206,11 @@ export function TaskDetailShell({
   stopTooltip?: string;
   /** 页面 AI 助手入口（打开各页挂的 PageAssistant）；不传不显示按钮 */
   onAssistant?: () => void;
+  /**
+   * 从断点续跑的回调；不传不显示按钮。页面自己决定何时可续（失败/被停
+   * 且有 checkpoint）——shell 只负责呈现，语义判断留在模块侧。
+   */
+  onResume?: (id: string) => Promise<void>;
 }) {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -273,6 +279,19 @@ export function TaskDetailShell({
             {task.status === 'PAUSED' && (
               <ActionButton tone="primary" icon={<Play />} onClick={() => toast.info(t('task.resumeDemo'))}>
                 {t('task.resume')}
+              </ActionButton>
+            )}
+            {/* 从断点续跑：页面判断可续（失败/被停且有 checkpoint）才传 onResume */}
+            {onResume && id && task.status !== 'RUNNING' && (
+              <ActionButton
+                tone="primary"
+                icon={<Play />}
+                tooltip={t('task.resumeFromHint')}
+                onClick={() => {
+                  void onResume(id).catch((e) => toast.error(String(e)));
+                }}
+              >
+                {t('task.resumeFrom')}
               </ActionButton>
             )}
             {task.status === 'RUNNING' && (

@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join, resolve, sep, dirname, relative } from 'node:path';
 import { Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, statSync, realpathSync, createReadStream, openSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, renameSync, mkdirSync, existsSync, readdirSync, statSync, realpathSync, createReadStream, openSync, readSync, closeSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
@@ -1393,6 +1393,8 @@ interface TrainTask {
   outputDir: string;
   /** 创建时拼好的完整 spawn 参数——spawn 与 createCommand 同源 */
   args: string[];
+  /** 续跑血缘：从哪个任务的 checkpoint 恢复（一键续跑/研究迭代传入） */
+  parentTaskId?: string;
   status: 'running' | 'done' | 'failed' | 'stopped';
   startedAt: string;
   /** 环形日志（截尾保留最近 500 行） */
@@ -1405,6 +1407,68 @@ interface TrainTask {
 }
 
 const trainTasks = new Map<string, TrainTask>();
+
+/*
+ * 结构化指标源（<output_dir>/metrics.jsonl，训练侧 StepState 逐 logging 步
+ * 追加）：webui 优先读它，日志解析作回落——旧任务/未升训练侧时曲线照常。
+ * mtime 缓存避免每次轮询全量读文件；收编任务重启后曲线也由此恢复。
+ */
+const metricsFileMtime = new Map<string, number>();
+
+function syncTrainMetricsFile(task: TrainTask): void {
+  const file = join(task.outputDir, 'metrics.jsonl');
+  try {
+    const st = statSync(file);
+    if (metricsFileMtime.get(task.id) === st.mtimeMs) return;
+    metricsFileMtime.set(task.id, st.mtimeMs);
+    const metrics: TrainMetric[] = [];
+    for (const line of readFileSync(file, 'utf-8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const r = JSON.parse(line) as Record<string, unknown>;
+        const step = Number(r.step);
+        const loss = Number(r.loss);
+        if (!Number.isInteger(step) || !Number.isFinite(loss)) continue;
+        /* lr 形态两种：CLI 侧 'learning rate'（含多 param group 变体）与 runtime 侧 lr */
+        let lr: number | undefined;
+        for (const [k, v] of Object.entries(r)) {
+          if (k === 'lr' || k.startsWith('learning rate')) {
+            const n = Number(v);
+            if (Number.isFinite(n)) {
+              lr = n;
+              break;
+            }
+          }
+        }
+        const gradNorm = Number(r.grad_norm);
+        const totalSteps = Number(r.total_steps);
+        /* 其余数值键全收进 extra（reward、rewards/margins 等，与日志解析同口径） */
+        const extra: Record<string, number> = {};
+        for (const [k, v] of Object.entries(r)) {
+          if (k === 'step' || k === 'loss' || k === 'grad_norm' || k === 'lr' || k === 'epoch' || k === 'total_steps' || k.startsWith('learning rate')) continue;
+          const n = Number(v);
+          if (Number.isFinite(n)) extra[k] = n;
+        }
+        metrics.push({
+          step,
+          loss,
+          ...(Number.isFinite(gradNorm) ? { gradNorm } : {}),
+          ...(lr !== undefined ? { lr } : {}),
+          ...(Object.keys(extra).length ? { extra } : {}),
+        });
+        if (Number.isFinite(totalSteps) && totalSteps > 0) task.totalSteps = totalSteps;
+      } catch {
+        /* 坏行跳过，不连坐 */
+      }
+    }
+    if (metrics.length) {
+      task.metrics = metrics.slice(-500);
+      task.step = metrics[metrics.length - 1].step;
+    }
+  } catch {
+    /* 无文件：保持日志解析路径 */
+  }
+}
 
 function pushTrainLog(task: TrainTask, line: string): void {
   task.log.push(line);
@@ -1459,6 +1523,49 @@ function pushTrainLog(task: TrainTask, line: string): void {
 function publicTrainTask(t: TrainTask) {
   const { proc: _proc, ...rest } = t;
   return rest;
+}
+
+/*
+ * ckpt 血缘（~/.swift/train/<id>/lineage.json，webui 独占写）：创建时记来源
+ * （底座/数据集/旋钮/父任务），终态时补产出 checkpoint 清单。agent 经
+ * list_checkpoints 读它——「这个 ckpt 从哪来、能不能续」不靠翻目录猜。
+ */
+function trainLineageFile(outputDir: string): string {
+  return join(dirname(outputDir), 'lineage.json');
+}
+
+function writeTrainLineage(task: TrainTask): void {
+  const remote = task.params.mode === 'remote';
+  const checkpoints = listTrainCheckpoints(task.outputDir).map((c) => ({
+    name: c.name,
+    path: join(task.outputDir, c.name),
+    mtimeMs: c.mtimeMs,
+    ...(remote ? { remote: true } : {}),
+  }));
+  const lineage = {
+    taskId: task.id,
+    taskType: task.taskType,
+    model: task.model,
+    datasets: task.datasets,
+    ...(task.valDatasets?.length ? { valDatasets: task.valDatasets } : {}),
+    tuner: task.tuner,
+    params: task.params,
+    status: task.status,
+    startedAt: task.startedAt,
+    ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
+    ...(remote ? { remote: { serverBaseUrl: String(task.params.server_base_url ?? '') } } : {}),
+    checkpoints,
+    updatedAt: new Date().toISOString().slice(0, 19).replace('T', ' '),
+  };
+  try {
+    const dir = dirname(trainLineageFile(task.outputDir));
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const tmp = `${trainLineageFile(task.outputDir)}.tmp`;
+    writeFileSync(tmp, JSON.stringify(lineage, null, 2));
+    renameSync(tmp, trainLineageFile(task.outputDir));
+  } catch {
+    /* 血缘写失败不影响任务本体 */
+  }
 }
 
 /*
@@ -1525,7 +1632,10 @@ function runTrainTask(task: TrainTask): void {
   proc.on('exit', (code) => {
     task.proc = undefined;
     /* 停止（SIGTERM）触发的退出不算失败 */
-    if (task.status !== 'running') return;
+    if (task.status !== 'running') {
+      writeTrainLineage(task);
+      return;
+    }
     if (code === 0) {
       task.status = 'done';
       pushTrainLog(task, '[webui] 训练完成');
@@ -1533,6 +1643,8 @@ function runTrainTask(task: TrainTask): void {
       task.status = 'failed';
       pushTrainLog(task, `[webui] 训练失败 (exit ${code ?? -1})`);
     }
+    /* 终态补产出 checkpoint 清单进血缘（续跑依据） */
+    writeTrainLineage(task);
   });
 }
 
@@ -1560,37 +1672,106 @@ interface ScriptTask {
   conv?: string;
   /** 发起任务的模型列（唤醒钉回同一列） */
   modelId?: string;
+  /** 收编任务没有子进程句柄，只有记下的 pid */
+  pid?: number;
 }
 
 const scriptTasks = new Map<string, ScriptTask>();
 
 /*
+ * 脚本任务的落盘面（~/.swift/scripts/<id>/）：meta.json（webui 独占写）+
+ * output.log（逐行追加）+ exit_code（退出回调写）。对齐训练/部署的任务目录
+ * 约定，使 webui 重启后能收编：活脚本重建进列表；重启期间结束的脚本把
+ * 唤醒补推给发起对话（wakeDelivered 防重复推）。
+ */
+function scriptTaskDir(id: string): string {
+  return join(swiftHome(), 'scripts', id);
+}
+
+/** 唤醒是否已推过（落盘在 meta.wakeDelivered；内存镜像供运行期改写） */
+const scriptWakeDelivered = new Map<string, boolean>();
+
+function writeScriptMeta(task: ScriptTask): void {
+  const dir = scriptTaskDir(task.id);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const meta = {
+    id: task.id,
+    ...(task.name ? { name: task.name } : {}),
+    script: task.script,
+    args: task.args,
+    status: task.status,
+    startedAt: task.startedAt,
+    ...(task.conv ? { conv: task.conv } : {}),
+    ...(task.modelId ? { modelId: task.modelId } : {}),
+    ...(task.pid ? { pid: task.pid } : {}),
+    wakeDelivered: scriptWakeDelivered.get(task.id) ?? false,
+  };
+  const tmp = join(dir, 'meta.json.tmp');
+  writeFileSync(tmp, JSON.stringify(meta, null, 2));
+  renameSync(tmp, join(dir, 'meta.json'));
+}
+
+/*
  * 会话唤醒队列：脚本终态事件推给发起它的对话（run_script 登记 conv），
  * 对话页 2s 一拍取走（take=1 消费即删）。与研究 events 队列同语义——消费
  * 即删、无需展示历史（事件文本本身进对话消息流，可审计）。
+ *
+ * 队列落盘（wakeup.json）：webui 重启（含部署重启）不清空待消费事件，否则
+ * 每次部署都在斩断在飞的研究接力。单写者=webui，tmp+rename 原子写。
  */
 const convEvents = new Map<string, { text: string; modelId?: string }[]>();
+
+function wakeupFile(): string {
+  return join(swiftHome(), 'wakeup.json');
+}
+
+function saveWakeup(): void {
+  const home = swiftHome();
+  if (!existsSync(home)) mkdirSync(home, { recursive: true });
+  const tmp = `${wakeupFile()}.tmp`;
+  writeFileSync(tmp, JSON.stringify([...convEvents.entries()]));
+  renameSync(tmp, wakeupFile());
+}
+
+(function loadWakeup(): void {
+  try {
+    const raw = JSON.parse(readFileSync(wakeupFile(), 'utf-8')) as [string, { text: string; modelId?: string }[]][];
+    for (const [conv, queue] of Array.isArray(raw) ? raw : []) convEvents.set(conv, queue);
+  } catch {
+    /* 无文件或坏文件：空队列起步 */
+  }
+})();
 
 function pushConvEvent(conv: string, ev: { text: string; modelId?: string }): void {
   const queue = convEvents.get(conv) ?? [];
   queue.push(ev);
   if (queue.length > 20) queue.splice(0, queue.length - 20);
   convEvents.set(conv, queue);
+  saveWakeup();
 }
 
 /* 脚本到达终态：向发起对话推一条带日志尾部的事件（详情由模型自己 read_script_log） */
-function notifyScriptWake(task: ScriptTask, status: 'done' | 'failed'): void {
+function notifyScriptWake(task: ScriptTask, status: 'done' | 'failed' | 'lost'): void {
   if (!task.conv) return;
   const tail = task.log.slice(-5).join('\n');
+  const outcome =
+    status === 'done' ? '已完成' : status === 'failed' ? '失败（exit 非零）' : '在 webui 重启期间结束（退出码未知）';
   pushConvEvent(task.conv, {
-    text: `后台脚本 ${task.script}（${task.id}）${status === 'done' ? '已完成' : '失败（exit 非零）'}。日志尾 5 行：\n${tail}\n需要完整日志用 read_script_log。`,
+    text: `后台脚本 ${task.script}（${task.id}）${outcome}。日志尾 5 行：\n${tail}\n需要完整日志用 read_script_log。`,
     ...(task.modelId ? { modelId: task.modelId } : {}),
   });
+  scriptWakeDelivered.set(task.id, true);
 }
 
 function pushScriptLog(task: ScriptTask, line: string): void {
   task.log.push(line);
   if (task.log.length > 500) task.log.splice(0, task.log.length - 500);
+  /* 落盘日志：重启收编后 read_script_log 仍可读（写失败不影响内存态） */
+  try {
+    appendFileSync(join(scriptTaskDir(task.id), 'output.log'), `${line}\n`);
+  } catch {
+    /* 目录不可写等场景：内存态照常，只是重启后不可恢复 */
+  }
 }
 
 function runScriptTask(task: ScriptTask, abs: string): void {
@@ -1602,6 +1783,8 @@ function runScriptTask(task: ScriptTask, abs: string): void {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   task.proc = proc;
+  task.pid = proc.pid;
+  writeScriptMeta(task);
   /* 脚本也可能打 tqdm 进度帧（\r 分隔），与训练日志同款拆法 */
   const onChunk = (buf: Buffer) =>
     buf
@@ -1616,22 +1799,112 @@ function runScriptTask(task: ScriptTask, abs: string): void {
   proc.on('exit', (code) => {
     task.proc = undefined;
     /* 停止（SIGTERM）触发的退出不算失败 */
-    if (task.status !== 'running') return;
+    if (task.status !== 'running') {
+      writeScriptMeta(task);
+      return;
+    }
     if (code === 0) {
       task.status = 'done';
       pushScriptLog(task, '[webui] 脚本执行完成');
-      notifyScriptWake(task, 'done');
     } else {
       task.status = 'failed';
       pushScriptLog(task, `[webui] 脚本失败 (exit ${code ?? -1})`);
-      notifyScriptWake(task, 'failed');
     }
+    /* 退出码先落盘再推唤醒：两步之间宕机由收编补推（wakeDelivered 仍 false） */
+    try {
+      writeFileSync(join(scriptTaskDir(task.id), 'exit_code'), String(code ?? -1));
+    } catch {
+      /* 不可写时唤醒照推，重启后只能以 lost 形态归因 */
+    }
+    notifyScriptWake(task, code === 0 ? 'done' : 'failed');
+    writeScriptMeta(task);
   });
 }
 
 function publicScriptTask(t: ScriptTask) {
   const { proc: _proc, ...rest } = t;
   return rest;
+}
+
+/*
+ * 脚本孤儿收编（对齐训练/部署收编）：活脚本按 meta 里的 pid 重建进列表
+ * （日志从 output.log 尾部恢复）；重启期间结束的脚本按 exit_code（有则
+ * done/failed、无则 failed-lost）收尾，未送达的唤醒补推给发起对话。
+ * 已送达终态的任务不重建——留在盘上作历史，列表不无限膨胀。
+ */
+function readScriptLogTail(id: string): string[] {
+  try {
+    const lines = readFileSync(join(scriptTaskDir(id), 'output.log'), 'utf-8').split('\n').filter(Boolean);
+    return lines.slice(-500);
+  } catch {
+    return [];
+  }
+}
+
+function adoptOrphanScriptTasks(): void {
+  const root = join(swiftHome(), 'scripts');
+  if (!existsSync(root)) return;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    let meta: Record<string, unknown>;
+    try {
+      meta = JSON.parse(readFileSync(join(root, entry.name, 'meta.json'), 'utf-8')) as Record<string, unknown>;
+    } catch {
+      continue; /* 坏 meta：认不出归属，跳过 */
+    }
+    const id = typeof meta.id === 'string' ? meta.id : entry.name;
+    if (scriptTasks.has(id)) continue;
+    const status = typeof meta.status === 'string' ? meta.status : 'running';
+    const wakeDelivered = meta.wakeDelivered === true;
+    scriptWakeDelivered.set(id, wakeDelivered);
+    const alive =
+      typeof meta.pid === 'number' &&
+      (() => {
+        try {
+          process.kill(meta.pid as number, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+    let exitCode: number | undefined;
+    try {
+      exitCode = Number(readFileSync(join(root, entry.name, 'exit_code'), 'utf-8').trim());
+      if (!Number.isFinite(exitCode)) exitCode = undefined;
+    } catch {
+      /* 无 exit_code 文件 */
+    }
+    const task: ScriptTask = {
+      id,
+      ...(typeof meta.name === 'string' ? { name: meta.name } : {}),
+      script: typeof meta.script === 'string' ? meta.script : '(未知)',
+      args: Array.isArray(meta.args) ? meta.args.map((a) => String(a)) : [],
+      status: 'running',
+      startedAt: typeof meta.startedAt === 'string' ? meta.startedAt : 'webui 重启前',
+      log: readScriptLogTail(id),
+      ...(typeof meta.conv === 'string' && meta.conv ? { conv: meta.conv } : {}),
+      ...(typeof meta.modelId === 'string' && meta.modelId ? { modelId: meta.modelId } : {}),
+      ...(typeof meta.pid === 'number' ? { pid: meta.pid } : {}),
+    };
+    if (status === 'running' && alive) {
+      task.log.unshift('[webui] 脚本在 webui 重启后仍在运行，已重新纳入管理');
+      scriptTasks.set(id, task);
+      continue;
+    }
+    /* running 但进程不在：webui 停机期间结束。有 exit_code 用它，无则 lost。 */
+    const finalStatus =
+      status === 'running' ? (exitCode === 0 ? 'done' : 'failed') : (['done', 'failed', 'stopped'].includes(status) ? (status as ScriptTask['status']) : 'failed');
+    task.status = finalStatus;
+    const needWake = Boolean(task.conv) && !wakeDelivered && status === 'running';
+    if (needWake) {
+      notifyScriptWake(task, exitCode !== undefined ? (exitCode === 0 ? 'done' : 'failed') : 'lost');
+    }
+    if (status === 'running' || needWake) {
+      writeScriptMeta(task);
+      scriptTasks.set(id, task);
+    }
+    /* 终态且已送达：不重建（历史留在盘上） */
+  }
 }
 
 /*
@@ -1909,10 +2182,15 @@ async function watchResearchTrain(session: ResearchSession): Promise<void> {
   }
   if (task.status === 'failed') {
     const tail = task.log.slice(-8).join('\n');
+    /* 远端形态的失败优先怀疑 server 侧（ckpt 回收/资源），与本地归因分开提示 */
+    const remoteHint =
+      task.params.mode === 'remote'
+        ? '\n远端形态：先考虑 server 侧因素（旧 checkpoint 被回收、服务资源），list_checkpoints 的返回里带远端提示。'
+        : '';
     await pushResearchEvent(
       session.id,
       'train-failed',
-      `迭代 ${it.index} 训练失败：\n${tail}\n\n先用 list_checkpoints 查断点，倾向 --resume_from_checkpoint 续跑；连续失败或无断点时停止并上报用户。`,
+      `迭代 ${it.index} 训练失败：\n${tail}\n\n先用 list_checkpoints 查断点，倾向 --resume_from_checkpoint 续跑；连续失败或无断点时停止并上报用户。${remoteHint}`,
     );
     await mutateResearch(session.id, (s) => {
       s.status = 'deciding';
@@ -2507,9 +2785,10 @@ function swiftApiPlugin(): Plugin {
   return {
     name: 'swift-api',
     configureServer(server) {
-      /* 重启收编：把上一代 webui 留下的孤儿部署与训练进程重新纳入任务表（异步，不挡启动） */
+      /* 重启收编：把上一代 webui 留下的孤儿部署、训练与脚本重新纳入任务表（异步，不挡启动） */
       void adoptOrphanDeploys();
       void adoptOrphanTrainTasks();
+      adoptOrphanScriptTasks();
       /*
        * autoresearch watcher：2s 一拍盯训练/评测状态跃迁，结论进事件队列。
        * server 关停时清掉定时器——vite 改配置重启会在同进程内重跑
@@ -3960,6 +4239,7 @@ function swiftApiPlugin(): Plugin {
           const seg0 = segs[0];
 
           if (req.method === 'GET' && !seg0) {
+            for (const task of trainTasks.values()) syncTrainMetricsFile(task);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ tasks: [...trainTasks.values()].map(publicTrainTask) }));
             return;
@@ -3971,8 +4251,25 @@ function swiftApiPlugin(): Plugin {
               res.end(JSON.stringify({ error: 'unknown train task' }));
               return;
             }
+            const ckpts = listTrainCheckpoints(task.outputDir).map((c) => ({ ...c, path: join(task.outputDir, c.name) }));
+            const latest = ckpts[0];
+            /* 远端形态：ckpt 在 server 侧，本机 output 下通常为空且不可枚举 */
+            const remote = task.params.mode === 'remote';
             res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ checkpoints: listTrainCheckpoints(task.outputDir) }));
+            res.end(
+              JSON.stringify({
+                checkpoints: ckpts,
+                /* 最新断点 + 续跑模板：agent 与一键续跑共用同一事实源 */
+                ...(latest ? { resumeFrom: latest.path } : {}),
+                ...(remote
+                  ? {
+                      remote: true,
+                      warning:
+                        '远端形态训练：checkpoint 存在 server 侧（本机不可枚举），服务端可能回收旧 checkpoint——续跑前先确认目标仍存在，失败时优先怀疑回收。',
+                    }
+                  : {}),
+              }),
+            );
             return;
           }
           if (req.method === 'GET' && seg0 && segs[1] === 'log') {
@@ -4146,6 +4443,7 @@ if (req.method === 'POST' && !seg0) {
                 metrics: [],
               };
               trainTasks.set(id, task);
+              writeTrainLineage(task);
               runTrainTask(task);
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({ id }));
@@ -4192,6 +4490,8 @@ if (req.method === 'POST' && !seg0) {
               params.rl_type = rlType;
             }
             const extraArgs = String(body.extraArgs ?? '').trim() || undefined;
+            /* 续跑血缘：一键续跑/研究迭代可带 parentTaskId（原任务 id） */
+            const parentTaskId = String(body.parentTaskId ?? '').trim() || undefined;
             /* 关注指标：字符串数组清洗（创建页预选，展示页消费） */
             const watchMetrics = (Array.isArray(body.watchMetrics) ? body.watchMetrics : [])
               .map((w: unknown) => String(w ?? '').trim())
@@ -4228,6 +4528,7 @@ if (req.method === 'POST' && !seg0) {
               params,
               ...(watchMetrics.length ? { watchMetrics } : {}),
               ...(extraArgs ? { extraArgs } : {}),
+              ...(parentTaskId ? { parentTaskId } : {}),
               outputDir: join(swiftHome(), 'train', id, 'output'),
             };
             const task: TrainTask = {
@@ -4239,6 +4540,7 @@ if (req.method === 'POST' && !seg0) {
               metrics: [],
             };
             trainTasks.set(id, task);
+            writeTrainLineage(task);
             runTrainTask(task);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ id }));
@@ -4284,6 +4586,7 @@ if (req.method === 'POST' && !seg0) {
                 }
               }
               pushTrainLog(task, '[webui] 用户停止训练');
+              writeTrainLineage(task);
             }
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ ok: true }));
@@ -4410,6 +4713,7 @@ if (req.method === 'POST' && !seg0) {
               return;
             }
             task.name = name;
+            writeScriptMeta(task);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ ok: true }));
             return;
@@ -4426,6 +4730,7 @@ if (req.method === 'POST' && !seg0) {
               task.status = 'stopped';
               task.proc?.kill('SIGTERM');
               pushScriptLog(task, '[webui] 用户停止脚本');
+              writeScriptMeta(task);
             }
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ ok: true }));
@@ -4711,6 +5016,7 @@ if (req.method === 'POST' && !seg0) {
           if (req.method === 'GET' && conv && url.searchParams.get('take') === '1') {
             const events = convEvents.get(conv) ?? [];
             convEvents.delete(conv);
+            saveWakeup();
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ events }));
             return;

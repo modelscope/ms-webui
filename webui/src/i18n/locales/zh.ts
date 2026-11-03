@@ -183,6 +183,8 @@ export const zh = {
   'task.pauseDemo': '暂停（示意，未接后端）',
   'task.resumeHint': '用同一个 adapter_name 起新客户端，无损续跑',
   'task.resumeDemo': '继续（示意，未接后端）',
+  'task.resumeFrom': '从断点续跑',
+  'task.resumeFromHint': '用本任务的参数 + --resume_from_checkpoint 最新断点，启动一个新的训练任务（血缘指回本任务）',
   'task.stop': '停止',
   'task.stopHint': '先发 SIGTERM 让它有机会保存 checkpoint，超时未退再 SIGKILL。',
   'task.sigtermHint': 'SIGTERM 优雅关停服务与子进程',
@@ -609,6 +611,9 @@ export const zh = {
   'tdl.showAll': ' 展示日志里出现的全部指标。',
   'tdl.metricsTab': '指标',
   'tdl.outputDir': '输出目录',
+  'tdl.resumeNoCheckpoint': '没有可续跑的 checkpoint（先检查 save_steps/save_strategy 是否产出断点）',
+  'tdl.resumeCodeUnsupported': '代码形态任务没有可复用的结构化参数，不支持一键续跑',
+  'tdl.resumeStarted': '已从最新断点启动续跑任务',
   'tdl.progressMeta': '进度',
   'tdl.sourceModel': '基座模型',
 
