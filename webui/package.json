@@ -55,7 +55,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/modelscope/web-ui-v5.git"
+    "url": "git+https://github.com/modelscope/ms-webui.git"
   },
   "license": "Apache-2.0"
 }
