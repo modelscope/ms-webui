@@ -1,0 +1,16 @@
+[Unit]
+Description=ms-webui (hosted, expo mode: remote training, no local GPU jobs)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ms-webui/webui
+Environment=SWIFT_WEBUI_MODE=expo
+Environment=SWIFT_PYTHON=/opt/swift-venv/bin/python
+Environment=PORT=5180
+ExecStart=/usr/bin/node scripts/start.mjs
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

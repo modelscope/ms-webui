@@ -1,0 +1,44 @@
+name: Deploy to host
+
+# Push-to-deploy for the hosted ms-webui (expo mode). The webui is one program —
+# frontend + task executors in a vite server — so deployment means shipping the source
+# tree to a persistent host and restarting the systemd unit there; a static host
+# (GitHub Pages) cannot run it. Host provisioning is done once via deploy/server-setup.sh.
+#
+# Required repository secrets (repo settings → Actions → Secrets):
+#   DEPLOY_SSH_KEY  private key of a keypair whose public half is in the host's authorized_keys
+#   DEPLOY_HOST     host address
+#   DEPLOY_USER     ssh user on the host (root on the temporary machine)
+
+on:
+  push:
+    branches: ['main']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ssh key
+        run: |
+          install -m 600 /dev/null ~/.ssh/id_ed25519
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Rsync source to the host
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" 'mkdir -p /opt/ms-webui/webui /opt/ms-webui/deploy'
+          rsync -az --delete \
+            --exclude node_modules --exclude dist --exclude .temp \
+            webui/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/ms-webui/webui/"
+          rsync -az deploy/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/ms-webui/deploy/"
+
+      - name: Install deps and restart the service
+        run: ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" 'bash /opt/ms-webui/deploy/deploy.sh'

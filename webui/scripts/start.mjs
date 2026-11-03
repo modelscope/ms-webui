@@ -22,7 +22,14 @@ const { createServer } = await import('vite');
 const server = await createServer({
   root: webuiRoot,
   /* --host: a packaged install is typically driven from another machine / container */
-  server: { host: true },
+  server: {
+    host: true,
+    /* PORT pins the listen port (managed hosts put the service behind a known port);
+     * strictPort there — silently drifting to another port is worse than failing. */
+    ...(process.env.PORT
+      ? { port: Number(process.env.PORT), strictPort: true }
+      : {}),
+  },
 });
 await server.listen();
 server.printUrls();
