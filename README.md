@@ -18,7 +18,8 @@
 
 ## ✨ What is ms-webui?
 
-ms-webui is the web interface of [ms-swift](https://github.com/modelscope/ms-swift) 5.x and twinkle.
+ms-webui is the web interface of [ms-swift](https://github.com/modelscope/ms-swift) 5.x
+and [twinkle](https://github.com/modelscope/twinkle).
 It covers the full model workflow in one place: creating and monitoring training,
 evaluation, export and deployment tasks, chatting with models through an agent
 loop with tools and skills, running long-form research sessions, and composing

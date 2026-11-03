@@ -18,7 +18,8 @@
 
 ## ✨ ms-webui 是什么？
 
-ms-webui 是 [ms-swift](https://github.com/modelscope/ms-swift) 5.x 的网页界面。
+ms-webui 是 [ms-swift](https://github.com/modelscope/ms-swift) 5.x 与
+[twinkle](https://github.com/modelscope/twinkle) 的网页界面。
 它把模型工作的完整流程收进一个入口：创建并监控训练、评测、导出、部署任务，
 通过带工具和技能的 agent 循环与模型对话，运行长周期的研究会话，以及在节点
 画布上编排多步流水线。界面和后端是同一个程序：dev server 承载任务执行器、
