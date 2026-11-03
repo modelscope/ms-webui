@@ -6,9 +6,9 @@ import { homedir } from 'node:os';
 import { join, resolve, sep, dirname, relative } from 'node:path';
 import { Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
-import { readFileSync, writeFileSync, appendFileSync, renameSync, mkdirSync, existsSync, readdirSync, statSync, realpathSync, createReadStream, openSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, renameSync, rmSync, statfsSync, mkdirSync, existsSync, readdirSync, statSync, realpathSync, createReadStream, openSync, readSync, closeSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { randomUUID } from 'node:crypto';
 
@@ -1223,6 +1223,8 @@ async function runEvalChain(task: EvalTask): Promise<void> {
   if (task.status === 'running') task.status = 'done';
   /* 已产出集的报告对任何终态都读回（含失败/停止前完成的部分） */
   task.report = readEvalReport(task.resultJsonl);
+  const { proc: _proc, log: _log, ...evalSnapshot } = task;
+  recordHistory('eval', evalSnapshot as Record<string, unknown>);
 }
 
 /*
@@ -1318,7 +1320,11 @@ function runExportTask(task: ExportTask): void {
   proc.on('exit', (code) => {
     task.proc = undefined;
     /* 停止（SIGTERM）触发的退出不算失败 */
-    if (task.status !== 'running') return;
+    if (task.status !== 'running') {
+      const { proc: _p, log: _l, ...earlySnapshot } = task;
+      recordHistory('export', earlySnapshot as Record<string, unknown>);
+      return;
+    }
     if (code === 0) {
       task.status = 'done';
       pushExportLog(task, '[webui] 导出完成');
@@ -1337,6 +1343,8 @@ function runExportTask(task: ExportTask): void {
       task.status = 'failed';
       pushExportLog(task, `[webui] 导出失败 (exit ${code ?? -1})`);
     }
+    const { proc: _proc, log: _log, ...exportSnapshot } = task;
+    recordHistory('export', exportSnapshot as Record<string, unknown>);
   });
 }
 
@@ -1473,6 +1481,12 @@ function syncTrainMetricsFile(task: TrainTask): void {
 function pushTrainLog(task: TrainTask, line: string): void {
   task.log.push(line);
   if (task.log.length > 500) task.log.splice(0, task.log.length - 500);
+  /* 落盘日志：重启收编后 read_train_log 仍可读（与脚本任务同一约定） */
+  try {
+    appendFileSync(join(dirname(task.outputDir), 'output.log'), `${line}\n`);
+  } catch {
+    /* 写失败不影响内存态，只是重启后不可恢复 */
+  }
   /*
    * 训练日志的权威进度行是 swift.dev 自己打的 logger 行：
    *   [INFO:swift.dev] step 3  loss=2.2546  lr=5.000000e-05  grad_norm=11.3125  reward=0.0312
@@ -1534,6 +1548,25 @@ function trainLineageFile(outputDir: string): string {
   return join(dirname(outputDir), 'lineage.json');
 }
 
+/*
+ * 数据集指纹：hub id 只记名字；本地文件（绝对/相对路径）补字节数与 mtime——
+ * 弱指纹但廉价（全量 hash 对大数据集太贵），足够回答「数据后来有没有被改过」。
+ */
+function datasetEntry(name: string): { name: string; bytes?: number; mtimeMs?: number } {
+  const entry: { name: string; bytes?: number; mtimeMs?: number } = { name };
+  try {
+    const p = name.startsWith('/') ? name : join(taskCwd(), name);
+    const st = statSync(p);
+    if (st.isFile()) {
+      entry.bytes = st.size;
+      entry.mtimeMs = st.mtimeMs;
+    }
+  } catch {
+    /* hub id 或不存在的路径：只记名字 */
+  }
+  return entry;
+}
+
 function writeTrainLineage(task: TrainTask): void {
   const remote = task.params.mode === 'remote';
   const checkpoints = listTrainCheckpoints(task.outputDir).map((c) => ({
@@ -1542,17 +1575,20 @@ function writeTrainLineage(task: TrainTask): void {
     mtimeMs: c.mtimeMs,
     ...(remote ? { remote: true } : {}),
   }));
+  const versions = probeStackVersions();
   const lineage = {
     taskId: task.id,
     taskType: task.taskType,
     model: task.model,
-    datasets: task.datasets,
-    ...(task.valDatasets?.length ? { valDatasets: task.valDatasets } : {}),
+    datasets: task.datasets.map(datasetEntry),
+    ...(task.valDatasets?.length ? { valDatasets: task.valDatasets.map(datasetEntry) } : {}),
     tuner: task.tuner,
     params: task.params,
     status: task.status,
     startedAt: task.startedAt,
     ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
+    ...(versions.swift ? { swiftVersion: versions.swift } : {}),
+    ...(versions.twinkle ? { twinkleVersion: versions.twinkle } : {}),
     ...(remote ? { remote: { serverBaseUrl: String(task.params.server_base_url ?? '') } } : {}),
     checkpoints,
     updatedAt: new Date().toISOString().slice(0, 19).replace('T', ' '),
@@ -1565,6 +1601,11 @@ function writeTrainLineage(task: TrainTask): void {
     renameSync(tmp, trainLineageFile(task.outputDir));
   } catch {
     /* 血缘写失败不影响任务本体 */
+  }
+  /* 终态同时进历史索引（log/metrics 不带：重启后从 output.log/metrics.jsonl 恢复） */
+  if (task.status !== 'running') {
+    const { log: _log, metrics: _metrics, proc: _proc, ...snapshot } = task;
+    recordHistory('train', snapshot as Record<string, unknown>);
   }
 }
 
@@ -1711,6 +1752,227 @@ function writeScriptMeta(task: ScriptTask): void {
   renameSync(tmp, join(dir, 'meta.json'));
 }
 
+/* ===== 长程可靠性共享机制：单实例锁 / 卡位守卫 / 磁盘水位 / 任务历史 ===== */
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/*
+ * 单实例锁（webui.lock 记 pid）：wakeup.json / research.json / history.json 都是
+ * 单写者文件，双开 webui 会互相覆盖。占用者活着则 fail loudly；同 pid 是
+ * vite 同进程内重启（configureServer 重跑），放行。
+ */
+function acquireWebuiLock(server: { httpServer?: { on: (ev: string, fn: () => void) => void } }): void {
+  const lock = join(swiftHome(), 'webui.lock');
+  try {
+    const prev = Number(readFileSync(lock, 'utf-8').trim());
+    if (Number.isInteger(prev) && prev !== process.pid && pidAlive(prev)) {
+      throw new Error(
+        `另一个 ms-webui 实例（pid ${prev}）正在运行。单写者文件（wakeup/research/history）不允许双实例——先停掉它，或换 SWIFT_WEBUI_HOME。`,
+      );
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+  mkdirSync(swiftHome(), { recursive: true });
+  writeFileSync(lock, String(process.pid));
+  server.httpServer?.on('close', () => {
+    try {
+      if (Number(readFileSync(lock, 'utf-8').trim()) === process.pid) rmSync(lock);
+    } catch {
+      /* 锁文件已被后来者接管：不动 */
+    }
+  });
+}
+
+/** 卡位占用登记：running/starting 任务的选卡 → 占用者（id + 类型）。 */
+function gpuOccupants(): Map<number, { id: string; kind: string }> {
+  const occ = new Map<number, { id: string; kind: string }>();
+  const add = (gpus: number[] | undefined, id: string, kind: string, busy: boolean) => {
+    if (!busy || !gpus?.length) return;
+    for (const g of gpus) if (!occ.has(g)) occ.set(g, { id, kind });
+  };
+  for (const t of trainTasks.values()) add(t.gpus, t.id, '训练', t.status === 'running');
+  for (const t of deployTasks.values()) add(t.gpus, t.id, '部署', t.status === 'starting' || t.status === 'running');
+  for (const t of evalTasks.values()) add(t.local?.gpus, t.id, '评测', t.status === 'starting' || t.status === 'running');
+  for (const t of exportTasks.values()) add(t.gpus, t.id, '导出', t.status === 'running');
+  return occ;
+}
+
+/*
+ * 卡位冲突守卫：冲突返回可行动的错误文案（创建路由以 409 拒绝），无冲突返回
+ * null。训练/评测/导出/部署/编排会话共用——资源撞车的自愈是模型最贵的负担，
+ * 在提交时挡下（换卡 / 等待 / 停占用任务三个出口都写进文案）。
+ */
+function gpuConflictError(gpus: number[] | undefined): string | null {
+  if (!gpus?.length) return null;
+  const occ = gpuOccupants();
+  const hits = gpus
+    .map((g) => {
+      const o = occ.get(g);
+      return o ? `卡 ${g}（${o.kind}任务 ${o.id} 占用中）` : null;
+    })
+    .filter((x): x is string => Boolean(x));
+  return hits.length ? `所选显卡已被占用：${hits.join('、')}。换卡、等它结束，或先停止占用任务再提交。` : null;
+}
+
+/** swiftHome 所在文件系统的可用空间（GB）；不可探测返回 null（守卫跳过不挡路）。 */
+function diskFreeGB(): number | null {
+  try {
+    const st = statfsSync(swiftHome());
+    return (st.bavail * st.bsize) / 1e9;
+  } catch {
+    return null;
+  }
+}
+
+/** 磁盘水位守卫：训练/导出/编排这类会写大量 checkpoint 的作业在提交时挡下。 */
+function diskGuardError(minGB = 2): string | null {
+  const free = diskFreeGB();
+  return free !== null && free < minGB ? `磁盘可用空间仅 ${free.toFixed(1)}GB（要求 ≥ ${minGB}GB）——先清理旧 checkpoint（prune_checkpoints）再提交。` : null;
+}
+
+/*
+ * 任务历史索引（history.json）：五类任务表都是内存 Map，收编只救活任务；
+ * 终态快照进此索引，重启后历史列表不空、eval/export 任务也可追溯。单写者
+ * = webui，截尾 300 条。快照不带 log/metrics（train 的从 output.log 尾部与
+ * metrics.jsonl 恢复，script 同理），其余字段保留（eval 的 report、export 的
+ * artifacts、deploy 的 endpoint）。
+ */
+interface HistoryEntry {
+  kind: 'train' | 'eval' | 'export' | 'deploy' | 'script';
+  endedAt: string;
+  snapshot: Record<string, unknown>;
+}
+
+const HISTORY_CAP = 300;
+
+function historyFile(): string {
+  return join(swiftHome(), 'history.json');
+}
+
+function recordHistory(kind: HistoryEntry['kind'], snapshot: Record<string, unknown>): void {
+  try {
+    const entries: HistoryEntry[] = (() => {
+      try {
+        const raw = JSON.parse(readFileSync(historyFile(), 'utf-8')) as HistoryEntry[];
+        return Array.isArray(raw) ? raw : [];
+      } catch {
+        return [];
+      }
+    })();
+    /* 同任务同类型的旧条目先移除：停止路径（DELETE）与退出回调都会各记一次 */
+    const deduped = entries.filter((e) => !(e.kind === kind && e.snapshot.id === snapshot.id));
+    deduped.unshift({ kind, endedAt: new Date().toISOString().slice(0, 19).replace('T', ' '), snapshot });
+    const capped = deduped.slice(0, HISTORY_CAP);
+    const tmp = `${historyFile()}.tmp`;
+    writeFileSync(tmp, JSON.stringify(capped));
+    renameSync(tmp, historyFile());
+  } catch {
+    /* 历史写失败不影响任务本体 */
+  }
+}
+
+/** 任务目录里 output.log 的尾部（重启恢复日志缓冲用；无文件返回空） */
+function readTaskLogTail(dir: string, cap = 500): string[] {
+  try {
+    const lines = readFileSync(join(dir, 'output.log'), 'utf-8').split('\n').filter(Boolean);
+    return lines.slice(-cap);
+  } catch {
+    return [];
+  }
+}
+
+function loadHistory(): void {
+  let entries: HistoryEntry[];
+  try {
+    const raw = JSON.parse(readFileSync(historyFile(), 'utf-8')) as HistoryEntry[];
+    entries = Array.isArray(raw) ? raw : [];
+  } catch {
+    return;
+  }
+  for (const { kind, snapshot } of entries) {
+    const id = typeof snapshot.id === 'string' ? snapshot.id : '';
+    if (!id) continue;
+    const withLog = { ...snapshot, log: [] as string[] };
+    if (kind === 'train') {
+      if (trainTasks.has(id)) continue;
+      const dir = typeof snapshot.outputDir === 'string' ? dirname(snapshot.outputDir) : '';
+      if (dir) withLog.log = readTaskLogTail(dir);
+      trainTasks.set(id, { ...(withLog as unknown as TrainTask), metrics: (withLog as unknown as TrainTask).metrics ?? [] });
+    } else if (kind === 'eval') {
+      if (evalTasks.has(id)) continue;
+      evalTasks.set(id, withLog as unknown as EvalTask);
+    } else if (kind === 'export') {
+      if (exportTasks.has(id)) continue;
+      exportTasks.set(id, withLog as unknown as ExportTask);
+    } else if (kind === 'deploy') {
+      if (deployTasks.has(id)) continue;
+      deployTasks.set(id, withLog as unknown as DeployTask);
+    } else if (kind === 'script') {
+      if (scriptTasks.has(id)) continue;
+      withLog.log = readTaskLogTail(scriptTaskDir(id));
+      scriptTasks.set(id, withLog as unknown as ScriptTask);
+    }
+  }
+}
+
+/*
+ * swift/twinkle 版本探测（进 lineage）：一次 spawnSync 探测后进程内缓存。
+ * 远端任务在别的机器上跑，版本只记本机 driver 侧——诚实记录「谁在驱动」。
+ */
+let stackVersionCache: { swift?: string; twinkle?: string } | undefined;
+
+function probeStackVersions(): { swift?: string; twinkle?: string } {
+  if (stackVersionCache) return stackVersionCache;
+  const out: { swift?: string; twinkle?: string } = {};
+  try {
+    const r = spawnSync(
+      resolvePython(),
+      ['-c', "import importlib.metadata as m\nfor pkg, key in (('ms-swift', 'swift'), ('twinkle-kit', 'twinkle')):\n    try:\n        print(key, m.version(pkg))\n    except Exception:\n        pass"],
+      { encoding: 'utf-8', timeout: 20000 },
+    );
+    for (const line of (r.stdout ?? '').split('\n')) {
+      const m = line.match(/^(swift|twinkle)\s+(\S+)$/);
+      if (m) out[m[1] as 'swift' | 'twinkle'] = m[2];
+    }
+  } catch {
+    /* 探测失败：lineage 不带版本，不影响任务 */
+  }
+  stackVersionCache = out;
+  return out;
+}
+
+/* ===== 对话历史服务端落盘（/api/convs；展览模式机器侧共享面，禁用） ===== */
+
+function convsFile(): string {
+  return join(swiftHome(), 'convs.json');
+}
+
+function readConvs(): { chats: unknown[]; turns: Record<string, Record<string, unknown>> } {
+  try {
+    const raw = JSON.parse(readFileSync(convsFile(), 'utf-8'));
+    return {
+      chats: Array.isArray((raw as { chats?: unknown }).chats) ? (raw as { chats: unknown[] }).chats : [],
+      turns: (raw as { turns?: Record<string, Record<string, unknown>> }).turns ?? {},
+    };
+  } catch {
+    return { chats: [], turns: {} };
+  }
+}
+
+function writeConvs(chats: unknown, turns: unknown): void {
+  const tmp = `${convsFile()}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ chats, turns }));
+  renameSync(tmp, convsFile());
+}
+
 /*
  * 会话唤醒队列：脚本终态事件推给发起它的对话（run_script 登记 conv），
  * 对话页 2s 一拍取走（take=1 消费即删）。与研究 events 队列同语义——消费
@@ -1801,6 +2063,8 @@ function runScriptTask(task: ScriptTask, abs: string): void {
     /* 停止（SIGTERM）触发的退出不算失败 */
     if (task.status !== 'running') {
       writeScriptMeta(task);
+      const { proc: _p, ...earlySnapshot } = task;
+      recordHistory('script', earlySnapshot as Record<string, unknown>);
       return;
     }
     if (code === 0) {
@@ -1818,6 +2082,8 @@ function runScriptTask(task: ScriptTask, abs: string): void {
     }
     notifyScriptWake(task, code === 0 ? 'done' : 'failed');
     writeScriptMeta(task);
+    const { proc: _proc, ...scriptSnapshot } = task;
+    recordHistory('script', scriptSnapshot as Record<string, unknown>);
   });
 }
 
@@ -1902,6 +2168,8 @@ function adoptOrphanScriptTasks(): void {
     if (status === 'running' || needWake) {
       writeScriptMeta(task);
       scriptTasks.set(id, task);
+      const { proc: _p, ...adoptedSnapshot } = task;
+      recordHistory('script', adoptedSnapshot as Record<string, unknown>);
     }
     /* 终态且已送达：不重建（历史留在盘上） */
   }
@@ -2466,7 +2734,11 @@ async function adoptOrphanTrainTasks(): Promise<void> {
       args: argv.slice(1),
       status: 'running',
       startedAt: 'webui 重启前',
-      log: ['[webui] 训练进程在 webui 重启后仍在运行，已重新纳入管理（参数从其命令行还原）'],
+      /* 日志从落盘的 output.log 尾部恢复（指标由 metrics.jsonl 同步恢复） */
+      log: [
+        ...readTaskLogTail(dirname(outputDir)),
+        '[webui] 训练进程在 webui 重启后仍在运行，已重新纳入管理（参数从其命令行还原）',
+      ],
       metrics: [],
       pid,
     };
@@ -2785,10 +3057,18 @@ function swiftApiPlugin(): Plugin {
   return {
     name: 'swift-api',
     configureServer(server) {
-      /* 重启收编：把上一代 webui 留下的孤儿部署、训练与脚本重新纳入任务表（异步，不挡启动） */
-      void adoptOrphanDeploys();
-      void adoptOrphanTrainTasks();
-      adoptOrphanScriptTasks();
+      /* 单实例锁先于一切：单写者文件面不允许双 webui 互踩 */
+      acquireWebuiLock(server);
+      /*
+       * 重启恢复两步，顺序即真相优先级：收编（活进程，最新真相）先，历史
+       * 索引（终态快照，旧真相）后——同 id 活任务覆盖历史里的陈旧终态。
+       */
+      void (async () => {
+        await adoptOrphanDeploys();
+        await adoptOrphanTrainTasks();
+        adoptOrphanScriptTasks();
+        loadHistory();
+      })();
       /*
        * autoresearch watcher：2s 一拍盯训练/评测状态跃迁，结论进事件队列。
        * server 关停时清掉定时器——vite 改配置重启会在同进程内重跑
@@ -3043,6 +3323,21 @@ function swiftApiPlugin(): Plugin {
                 ? body.gpuCount
                 : undefined;
             const nproc = gpus?.length ?? gpuCount ?? 0;
+            /* 卡位与磁盘守卫：冲突/水位不足在提交时挡下（409），不留给 OOM 事后排障 */
+            const gpuConflict = gpuConflictError(gpus);
+            if (gpuConflict) {
+              res.statusCode = 409;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: gpuConflict }));
+              return;
+            }
+            const diskShort = diskGuardError();
+            if (diskShort) {
+              res.statusCode = 409;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: diskShort }));
+              return;
+            }
             /* 「将要执行」直写的附加参数（引号包着的带空格值支持） */
             const extraArgs = splitExtraArgs(String(body.extraArgs ?? ''));
             const plugins = (Array.isArray(body.plugins) ? body.plugins : [])
@@ -3103,6 +3398,8 @@ function swiftApiPlugin(): Plugin {
                 if (code !== 0) pushLog(task, `[webui] deploy process exited with code ${code}`);
               }
               unregisterDeployedModel(task);
+              const { proc: _proc, log: _log, ...deploySnapshot } = task;
+              recordHistory('deploy', deploySnapshot as Record<string, unknown>);
             });
             void waitUntilReady(task);
             res.setHeader('Content-Type', 'application/json');
@@ -3363,6 +3660,14 @@ function swiftApiPlugin(): Plugin {
               .map((p: unknown) => String(p ?? '').trim())
               .filter(Boolean);
             const extraArgs = String(body.extraArgs ?? '').trim() || undefined;
+            /* 卡位与磁盘守卫：导出要加载模型，与训练同属重作业 */
+            const guardErr = gpuConflictError(gpus) ?? diskGuardError();
+            if (guardErr) {
+              res.statusCode = 409;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: guardErr }));
+              return;
+            }
             /* 与 CLI 的 _validate_export 同一套早失败，把报错留在提交时刻 */
             if (!model) {
               res.statusCode = 400;
@@ -3760,6 +4065,16 @@ function swiftApiPlugin(): Plugin {
             && !['released', 'lost'].includes(live.state)) {
           return live;
         }
+        /*
+         * 编排会话复用任务守卫：graph 的 resource 段声明本机选卡（resource.gpus
+         * 数字数组）时查卡位冲突；新建会话要跑训练/导出节点，水位同样要查。
+         * 抛错由外层路由的 catch 统一回给提交方（fail loudly，带可行动文案）。
+         */
+        const declaredGpus = Array.isArray(graph?.resource?.gpus)
+          ? (graph.resource.gpus as unknown[]).map((g) => Number(g)).filter((g) => Number.isInteger(g) && g >= 0)
+          : undefined;
+        const guardErr = gpuConflictError(declaredGpus) ?? diskGuardError();
+        if (guardErr) throw new Error(guardErr);
         const id = `wf-s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
         const dir = join(workspaceRoot(), 'workflow-sessions', key || id);
         mkdirSync(dir, { recursive: true });
@@ -4283,6 +4598,40 @@ function swiftApiPlugin(): Plugin {
             res.end(JSON.stringify({ lines: task.log }));
             return;
           }
+          /*
+           * 断点清理（POST :id/prune {keep:N}）：只删本任务 output 下的旧
+           * checkpoint 目录，保留最新 N 个；lineage 同步重写。磁盘水位的
+           * 出口——agent（prune_checkpoints 工具）与人（curl）共用。
+           */
+          if (req.method === 'POST' && seg0 && segs[1] === 'prune') {
+            const task = trainTasks.get(seg0);
+            if (!task) {
+              res.statusCode = 404;
+              res.end(JSON.stringify({ error: 'unknown train task' }));
+              return;
+            }
+            const body = (await readJsonBody(req)) as { keep?: unknown };
+            const keep = Number.isInteger(body.keep) && (body.keep as number) > 0 ? (body.keep as number) : 1;
+            const ckpts = listTrainCheckpoints(task.outputDir);
+            const victims = ckpts.slice(keep);
+            if (!victims.length) {
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ pruned: [], kept: ckpts.map((c) => c.name) }));
+              return;
+            }
+            try {
+              for (const v of victims) rmSync(join(task.outputDir, v.name), { recursive: true, force: true });
+            } catch (e) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: `清理失败: ${String(e)}` }));
+              return;
+            }
+            writeTrainLineage(task);
+            pushTrainLog(task, `[webui] 清理旧 checkpoint：保留最新 ${keep} 个，删除 ${victims.map((v) => v.name).join('、')}`);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ pruned: victims.map((v) => v.name), kept: ckpts.slice(0, keep).map((c) => c.name) }));
+            return;
+          }
                     /* 并行规划器的规则名清单（orm/prm 注册表；判别奖励条目是否占独立组）。缓存，失败降级空清单 */
           if (req.method === 'GET' && seg0 === 'orm-rules') {
             if (ormRulesCache) {
@@ -4418,6 +4767,14 @@ if (req.method === 'POST' && !seg0) {
               const gpus = (Array.isArray(body.gpus) ? body.gpus : [])
                 .map((g: unknown) => Number(g))
                 .filter((g: number) => Number.isInteger(g) && g >= 0);
+              /* 卡位与磁盘守卫（与 CLI 形态同一条） */
+              const guardErr = gpuConflictError(gpus) ?? diskGuardError();
+              if (guardErr) {
+                res.statusCode = 409;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: guardErr }));
+                return;
+              }
               const id = `train-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
               const name = String(body.name ?? '').trim() || undefined;
               const codeDir = join(workspaceRoot(), 'train-code');
@@ -4466,6 +4823,14 @@ if (req.method === 'POST' && !seg0) {
               .map((g: unknown) => Number(g))
               .filter((g: number) => Number.isInteger(g) && g >= 0);
             const gpuCount = Number.isInteger(body.gpuCount) && body.gpuCount > 0 ? body.gpuCount : undefined;
+            /* 卡位与磁盘守卫：本机选卡才查冲突（集群卡数是远端资源）；水位两类都查 */
+            const guardErr = gpuConflictError(gpus) ?? diskGuardError();
+            if (guardErr) {
+              res.statusCode = 409;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: guardErr }));
+              return;
+            }
             /* params 只收标量 KV（key = CLI flag 名），非标量值丢弃 */
             const params: Record<string, string | number | boolean> = {};
             for (const [k, v] of Object.entries(body.params ?? {})) {
@@ -5026,6 +5391,41 @@ if (req.method === 'POST' && !seg0) {
           res.end(JSON.stringify({ error: 'GET /api/conv-events?conv=<会话id>&take=1' }));
         } catch (e) {
           res.statusCode = 500;
+          res.end(JSON.stringify({ error: String(e) }));
+        }
+      });
+
+      /*
+       * 对话历史的服务端备份（convs.json）：浏览器 localStorage 仍是主存储，
+       * 这里做同栈镜像——换设备/换实例/清缓存后可拉回。PUT 全量覆盖（删除
+       * 随下一次推送自然传播）。展览模式禁用：机器侧文件是共享面，多用户
+       * 的对话不允许混进同一份 convs.json。
+       */
+      server.middlewares.use('/api/convs', async (req, res) => {
+        try {
+          if (launchMode() === 'expo') {
+            res.statusCode = 403;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: '展览模式不保存对话到运行机器' }));
+            return;
+          }
+          if (req.method === 'GET') {
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(readConvs()));
+            return;
+          }
+          if (req.method === 'PUT') {
+            const body = (await readJsonBody(req)) as { chats?: unknown; turns?: unknown };
+            writeConvs(Array.isArray(body.chats) ? body.chats : [], body.turns ?? {});
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          res.statusCode = 405;
+          res.end();
+        } catch (e) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ error: String(e) }));
         }
       });

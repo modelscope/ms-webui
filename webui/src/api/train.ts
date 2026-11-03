@@ -144,6 +144,17 @@ export async function listTrainCheckpoints(id: string): Promise<TrainCheckpoints
   return (await res.json()) as TrainCheckpointsInfo;
 }
 
+/** 清理旧断点：保留最新 keep 个，其余删除；返回删掉的与保留的名字 */
+export async function pruneCheckpoints(id: string, keep = 1): Promise<{ pruned: string[]; kept: string[] }> {
+  const res = await fetch(`/api/train/${encodeURIComponent(id)}/prune`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keep }),
+  });
+  if (!res.ok) throw new Error((await res.json()).error ?? tStatic('api.loadFailed'));
+  return (await res.json()) as { pruned: string[]; kept: string[] };
+}
+
 /** 重命名：只改 webui 里的显示名，不触碰任务本体与输出目录 */
 export async function renameTrain(id: string, name: string): Promise<void> {
   const res = await fetch(`/api/train/${encodeURIComponent(id)}`, {

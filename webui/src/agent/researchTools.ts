@@ -6,7 +6,7 @@ import {
   type ResearchTrainConfig,
 } from '@/api/research';
 import { installChallenger, listChallengers } from '@/api/challenger';
-import { startTrain } from '@/api/train';
+import { pruneCheckpoints, startTrain } from '@/api/train';
 import { defineTool, type AgentTool } from './tools';
 
 /*
@@ -299,6 +299,36 @@ export function researchTools(conv: string, model: string): AgentTool[] {
     },
   );
 
+  const pruneCheckpointsTool = defineTool(
+    {
+      type: 'function',
+      function: {
+        name: 'prune_checkpoints',
+        description:
+          '清理一个训练任务的旧 checkpoint（保留最新 N 个，其余删除）——磁盘吃紧时的出口。' +
+          '删掉的不可恢复；续跑只需要最新断点，旧断点通常可安全清理',
+        parameters: {
+          type: 'object',
+          properties: {
+            train_task_id: { type: 'string', description: '训练任务 id' },
+            keep: { type: 'integer', description: '保留最新几个（默认 1）' },
+          },
+          required: ['train_task_id'],
+        },
+      },
+    },
+    async (args) => {
+      try {
+        const { pruned, kept } = await pruneCheckpoints(str(args.train_task_id), Number(args.keep) || 1);
+        return pruned.length
+          ? `已删除 ${pruned.length} 个旧断点：${pruned.join('、')}。保留：${kept.join('、') ?? '（无）'}`
+          : '没有可清理的断点（数量不超过保留数）。';
+      } catch (e) {
+        return String(e instanceof Error ? e.message : e);
+      }
+    },
+  );
+
   const startTrainTool = defineTool(
     {
       type: 'function',
@@ -444,5 +474,5 @@ export function researchTools(conv: string, model: string): AgentTool[] {
     },
   );
 
-  return [create, update, checkpoints, startTrainTool, listChallengerTool, installChallengerTool];
+  return [create, update, checkpoints, pruneCheckpointsTool, startTrainTool, listChallengerTool, installChallengerTool];
 }

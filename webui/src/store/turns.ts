@@ -7,6 +7,7 @@
  */
 
 import type { ChatMessage } from '@/api/models';
+import { scheduleConvPush } from './convsSync';
 
 const TURNS_KEY = 'swift-webui-turns';
 
@@ -28,6 +29,8 @@ export function saveTurns(convId: string, modelId: string, messages: ChatMessage
   } catch {
     /* 超出配额等写失败不影响内存态 */
   }
+  /* 服务端镜像：消息桶的每次写都触发防抖推送 */
+  scheduleConvPush();
 }
 
 /**
@@ -46,6 +49,7 @@ export function moveTurns(convId: string, fromModel: string, toModel: string): v
   } catch {
     /* 同 saveTurns：写失败不影响内存态 */
   }
+  scheduleConvPush();
 }
 
 /** 删一个会话的全部桶（会话删除时调用） */
@@ -57,4 +61,5 @@ export function removeTurns(convId: string): void {
   } catch {
     /* 同上 */
   }
+  scheduleConvPush();
 }

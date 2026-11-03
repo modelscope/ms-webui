@@ -417,7 +417,17 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
       try {
         if (type === 'train') {
           const tasks = await listTrains();
-          lines.push(...tasks.map((t) => `- ${t.id} · ${t.status} · ${trainTaskLabel(t)}`));
+          /* 进度与续跑提示——事实 + 建议动作同包 */
+          lines.push(
+            ...tasks.map((t) => {
+              const head = `- ${t.id} · ${t.status} · ${trainTaskLabel(t)}`;
+              const pos = t.totalSteps ? `（${t.step ?? 0}/${t.totalSteps} 步）` : '';
+              if (t.status === 'failed' || t.status === 'stopped') {
+                return `${head}${pos} —— 用 list_checkpoints 查断点可 --resume_from_checkpoint 续跑`;
+              }
+              return `${head}${pos}`;
+            }),
+          );
         } else if (type === 'eval') {
           const tasks = await listEvals();
           lines.push(...tasks.map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.modelId}`));
