@@ -7,14 +7,14 @@ import { PageAssistant } from '@/components/PageAssistant';
 import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
 import { MODULES } from '@/theme/modules';
-import type { TaskItem } from '@/mock/types';
+import { mapTaskStatus, type TaskItem } from '@/mock/types';
 import { getScriptLog, listScripts, renameScript, startScript, stopScript, type ScriptTaskInfo } from '@/api/scripts';
 import { useT } from '@/i18n';
 import { toast } from 'sonner';
 
 /** 后端脚本状态 -> 详情页任务状态 */
 function toTaskItem(t: ScriptTaskInfo): TaskItem {
-  const status = t.status === 'failed' ? 'FAILED' : t.status === 'done' ? 'DONE' : t.status === 'stopped' ? 'STOPPED' : 'RUNNING';
+  const status = mapTaskStatus(t.status);
   return {
     id: t.id,
     type: 'scripts',

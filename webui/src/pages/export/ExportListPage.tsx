@@ -4,7 +4,7 @@ import { MODULES } from '@/theme/modules';
 import { PageAssistant } from '@/components/PageAssistant';
 import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
-import type { TaskItem } from '@/mock/types';
+import { mapTaskStatus, type TaskItem } from '@/mock/types';
 import { listExports, renameExport, stopExport, type ExportTaskInfo } from '@/api/export';
 import { useT, type MessageKey } from '@/i18n';
 
@@ -22,7 +22,7 @@ function opSummary(task: ExportTaskInfo, t: TFn): string {
 
 /** 后端导出状态 -> 列表页任务状态 */
 function toTaskItem(task: ExportTaskInfo, t: TFn): TaskItem {
-  const status = task.status === 'failed' ? 'FAILED' : task.status === 'running' ? 'RUNNING' : task.status === 'stopped' ? 'STOPPED' : 'DONE';
+  const status = mapTaskStatus(task.status);
   return {
     id: task.id,
     type: 'export',

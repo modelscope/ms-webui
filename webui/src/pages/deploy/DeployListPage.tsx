@@ -4,13 +4,13 @@ import { MODULES } from '@/theme/modules';
 import { PageAssistant } from '@/components/PageAssistant';
 import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
-import type { TaskItem } from '@/mock/types';
+import { mapTaskStatus, type TaskItem } from '@/mock/types';
 import { listDeploys, renameDeploy, stopDeploy, type DeployTaskInfo } from '@/api/deploy';
 import { useT } from '@/i18n';
 
 /** 后端部署状态 -> 列表页任务状态；starting 也算运行中（正在拉起） */
 function toTaskItem(t: DeployTaskInfo): TaskItem {
-  const status = t.status === 'failed' ? 'FAILED' : t.status === 'stopped' ? 'STOPPED' : 'RUNNING';
+  const status = mapTaskStatus(t.status);
   return {
     id: t.id,
     type: 'deploy',

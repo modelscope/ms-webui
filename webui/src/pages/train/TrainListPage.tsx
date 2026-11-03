@@ -4,13 +4,13 @@ import { MODULES } from '@/theme/modules';
 import { PageAssistant } from '@/components/PageAssistant';
 import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
-import type { TaskItem } from '@/mock/types';
+import { mapTaskStatus, type TaskItem } from '@/mock/types';
 import { listTrains, renameTrain, stopTrain, trainTaskLabel, type TrainTaskInfo } from '@/api/train';
 import { useT } from '@/i18n';
 
 /** 后端训练状态 -> 列表页任务状态 */
 function toTaskItem(t: TrainTaskInfo): TaskItem {
-  const status = t.status === 'failed' ? 'FAILED' : t.status === 'running' ? 'RUNNING' : t.status === 'stopped' ? 'STOPPED' : 'DONE';
+  const status = mapTaskStatus(t.status);
   /* 远端形态（mode=remote）显示 server 地址：如实展示这轮训练跑在哪 */
   const serverUrl =
     t.params.mode === 'remote' && t.params.server_base_url ? String(t.params.server_base_url) : undefined;

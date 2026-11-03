@@ -388,6 +388,30 @@ function splitExtraArgs(raw: string): string[] {
 }
 
 /*
+ * 任务执行器通用件：五类任务（deploy/eval/export/train/script）的日志与
+ * 公开形态同构——环形 500 行截尾、可选逐行落盘、剥掉 proc 句柄再出 API。
+ * 各执行器保留自己的 pushXxxLog / publicXxx 名字（调用点数十处），实现收拢
+ * 在这里：五份拷贝各自漂移的形态（如 deploy 曾漏 error handler）就此绝迹。
+ */
+
+/** 环形日志（截尾保留最近 500 行）；persist 提供时逐行落盘（重启收编后可恢复） */
+function pushTaskLog<T extends { log: string[] }>(task: T, line: string, persist?: (line: string) => void): void {
+  task.log.push(line);
+  if (task.log.length > 500) task.log.splice(0, task.log.length - 500);
+  try {
+    persist?.(line);
+  } catch {
+    /* 落盘失败不影响内存态，只是重启后不可恢复 */
+  }
+}
+
+/** 公开形态：剥掉子进程句柄（proc 不能序列化，也不该出 API） */
+function publicOf<T extends { proc?: unknown }>(t: T): Omit<T, 'proc'> {
+  const { proc: _proc, ...rest } = t;
+  return rest;
+}
+
+/*
  * 模型/数据集候选清单（新建页可搜索下拉的数据源）：真相源是 swift 的两个
  * 注册表——swift.model.MODEL_MAPPING（每个 ModelMeta 的 model_groups 展开
  * 出全部 hub id，约千余条，随 swift 新增模型自动长出来）与
@@ -949,8 +973,7 @@ interface DeployTask {
 const deployTasks = new Map<string, DeployTask & { proc?: ChildProcess }>();
 
 function pushLog(task: DeployTask & { proc?: ChildProcess }, line: string): void {
-  task.log.push(line);
-  if (task.log.length > 500) task.log.splice(0, task.log.length - 500);
+  pushTaskLog(task, line);
 }
 
 function pickFreePort(from: number): Promise<number> {
@@ -1031,8 +1054,7 @@ function unregisterDeployedModel(task: DeployTask): void {
 }
 
 function publicTask(t: DeployTask & { proc?: ChildProcess }) {
-  const { proc: _proc, ...rest } = t;
-  return rest;
+  return publicOf(t);
 }
 
 /*
@@ -1084,8 +1106,7 @@ interface EvalTask {
 const evalTasks = new Map<string, EvalTask>();
 
 function pushEvalLog(task: EvalTask, line: string): void {
-  task.log.push(line);
-  if (task.log.length > 500) task.log.splice(0, task.log.length - 500);
+  pushTaskLog(task, line);
 }
 
 /**
@@ -1110,8 +1131,7 @@ function readEvalReport(file: string): { dataset: string; rows: unknown[] }[] {
 }
 
 function publicEvalTask(t: EvalTask) {
-  const { proc: _proc, ...rest } = t;
-  return rest;
+  return publicOf(t);
 }
 
 /**
@@ -1266,13 +1286,11 @@ interface ExportTask {
 const exportTasks = new Map<string, ExportTask>();
 
 function pushExportLog(task: ExportTask, line: string): void {
-  task.log.push(line);
-  if (task.log.length > 500) task.log.splice(0, task.log.length - 500);
+  pushTaskLog(task, line);
 }
 
 function publicExportTask(t: ExportTask) {
-  const { proc: _proc, ...rest } = t;
-  return rest;
+  return publicOf(t);
 }
 
 /** 与任务执行器 spawn 的参数一致——详情页「创建命令」按同一逻辑拼装 */
@@ -1479,14 +1497,8 @@ function syncTrainMetricsFile(task: TrainTask): void {
 }
 
 function pushTrainLog(task: TrainTask, line: string): void {
-  task.log.push(line);
-  if (task.log.length > 500) task.log.splice(0, task.log.length - 500);
   /* 落盘日志：重启收编后 read_train_log 仍可读（与脚本任务同一约定） */
-  try {
-    appendFileSync(join(dirname(task.outputDir), 'output.log'), `${line}\n`);
-  } catch {
-    /* 写失败不影响内存态，只是重启后不可恢复 */
-  }
+  pushTaskLog(task, line, (l) => appendFileSync(join(dirname(task.outputDir), 'output.log'), `${l}\n`));
   /*
    * 训练日志的权威进度行是 swift.dev 自己打的 logger 行：
    *   [INFO:swift.dev] step 3  loss=2.2546  lr=5.000000e-05  grad_norm=11.3125  reward=0.0312
@@ -1535,8 +1547,7 @@ function pushTrainLog(task: TrainTask, line: string): void {
 }
 
 function publicTrainTask(t: TrainTask) {
-  const { proc: _proc, ...rest } = t;
-  return rest;
+  return publicOf(t);
 }
 
 /*
@@ -1616,6 +1627,8 @@ function writeTrainLineage(task: TrainTask): void {
  * 旋钮，属地键在 PATCH 收口与快照收口处一律剥掉。
  */
 const TRAIN_OWNED_KEYS = new Set([
+  /* 与 src/agent/researchTools.ts 的同名集合必须同步改（前后端无法共享 import，
+   * 漏一边属地键防御就静默失效）；这里覆盖 train/export 两类执行器 */
   'model', 'dataset', 'val_dataset', 'tuner', 'external_plugins', 'nproc_per_node', 'output_dir',
 ]);
 
@@ -2026,14 +2039,8 @@ function notifyScriptWake(task: ScriptTask, status: 'done' | 'failed' | 'lost'):
 }
 
 function pushScriptLog(task: ScriptTask, line: string): void {
-  task.log.push(line);
-  if (task.log.length > 500) task.log.splice(0, task.log.length - 500);
-  /* 落盘日志：重启收编后 read_script_log 仍可读（写失败不影响内存态） */
-  try {
-    appendFileSync(join(scriptTaskDir(task.id), 'output.log'), `${line}\n`);
-  } catch {
-    /* 目录不可写等场景：内存态照常，只是重启后不可恢复 */
-  }
+  /* 落盘日志：重启收编后 read_script_log 仍可读 */
+  pushTaskLog(task, line, (l) => appendFileSync(join(scriptTaskDir(task.id), 'output.log'), `${l}\n`));
 }
 
 function runScriptTask(task: ScriptTask, abs: string): void {
@@ -2088,8 +2095,7 @@ function runScriptTask(task: ScriptTask, abs: string): void {
 }
 
 function publicScriptTask(t: ScriptTask) {
-  const { proc: _proc, ...rest } = t;
-  return rest;
+  return publicOf(t);
 }
 
 /*
@@ -3390,6 +3396,17 @@ function swiftApiPlugin(): Plugin {
             const onChunk = (buf: Buffer) => buf.toString('utf-8').split('\n').filter(Boolean).forEach((l) => pushLog(task, l));
             proc.stdout?.on('data', onChunk);
             proc.stderr?.on('data', onChunk);
+            /*
+             * spawn 失败（如解释器路径失效）只发 error + close，不发 exit——
+             * 其余四类执行器都有这段，deploy 漏了会让 error 变 uncaught
+             * exception 直接崩掉 dev server，连带杀死全部在跑任务的监管。
+             */
+            proc.on('error', (e) => {
+              pushLog(task, `[webui] deploy spawn 失败: ${e}`);
+              task.status = 'failed';
+              const { proc: _p, log: _l, ...snap } = task;
+              recordHistory('deploy', snap as Record<string, unknown>);
+            });
             proc.on('exit', (code) => {
               if (task.status === 'starting' || task.status === 'running') {
                 /* 成败只看退出码：曾就绪过的部署失败退出同样是失败，不是「已停止」；
@@ -3542,6 +3559,18 @@ function swiftApiPlugin(): Plugin {
               res.statusCode = 400;
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({ error: '至少选择一个评测集' }));
+              return;
+            }
+            /*
+             * 本地直评是占卡作业（api 模式打的是远端端点）：与训练/导出/部署
+             * 同一道卡位/磁盘守卫——此前评测「卫人而不被人卫」，手动提交可与
+             * 在跑训练撞卡（watcher 的自动路径自己挑了空闲卡，不受此影响）。
+             */
+            const evalGuardErr = gpuConflictError(local?.gpus) ?? diskGuardError();
+            if (evalGuardErr) {
+              res.statusCode = 409;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: evalGuardErr }));
               return;
             }
             const id = `eval-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -4089,7 +4118,8 @@ function swiftApiPlugin(): Plugin {
         const proc = spawn(resolvePython(), ['-m', 'swift.dev.webui.session', join(dir, 'graph.json')], {
           cwd: dir,
           env: {
-            ...process.env,
+            /* 与其余执行器同一环境源：解释器选谁，PATH 就优先谁的 bin（spawnEnv） */
+            ...spawnEnv(),
             USE_SWIFT_V5: '1',
           },
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -4642,6 +4672,8 @@ function swiftApiPlugin(): Plugin {
             let out = '';
             const proc = spawn(resolvePython(), ['-c', ORM_RULES_PROBE], { stdio: ['ignore', 'pipe', 'pipe'] });
             proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+            /* spawn 失败只发 error + close 不发 exit；close 兜底分支会以 500 收口，这里只防 uncaught */
+            proc.on('error', () => {});
             const timer = setTimeout(() => proc.kill('SIGKILL'), 30_000);
             proc.on('close', () => {
               clearTimeout(timer);
@@ -4682,6 +4714,8 @@ function swiftApiPlugin(): Plugin {
             });
             proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
             proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+            /* spawn 失败只发 error + close 不发 exit；close 兜底分支会以 500 收口，这里只防 uncaught */
+            proc.on('error', () => {});
             const timer = setTimeout(() => proc.kill('SIGKILL'), 120_000);
             proc.on('close', () => {
               clearTimeout(timer);
@@ -4725,6 +4759,8 @@ function swiftApiPlugin(): Plugin {
             });
             proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
             proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+            /* spawn 失败只发 error + close 不发 exit；close 兜底分支会以 500 收口，这里只防 uncaught */
+            proc.on('error', () => {});
             const timer = setTimeout(() => proc.kill('SIGKILL'), 30_000);
             proc.on('close', () => {
               clearTimeout(timer);
@@ -5265,6 +5301,13 @@ if (req.method === 'POST' && !seg0) {
                     ...(typeof x.evalTaskId === 'string' && x.evalTaskId ? { evalTaskId: x.evalTaskId } : {}),
                     ...(typeof x.note === 'string' && x.note ? { note: x.note } : {}),
                     ...(Number.isFinite(Number(x.score)) ? { score: Number(x.score) } : {}),
+                    /*
+                     * watcher 的防重字段（parallel: 评过哪个 ckpt；during: 记到哪个
+                     * step）：整组回传的 PATCH 若把它们剥掉，watcher 会对同一
+                     * checkpoint/同一 step 重复起评——必须原样透传。
+                     */
+                    ...(typeof x.evaluatedCkpt === 'string' && x.evaluatedCkpt ? { evaluatedCkpt: x.evaluatedCkpt } : {}),
+                    ...(Number.isFinite(Number(x.lastEvalStep)) ? { lastEvalStep: Number(x.lastEvalStep) } : {}),
                   }));
               }
               if (body.trainConfig && typeof body.trainConfig === 'object') {

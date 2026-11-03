@@ -9,13 +9,13 @@ import { MODULES } from '@/theme/modules';
 import { PageAssistant } from '@/components/PageAssistant';
 import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
-import type { TaskItem } from '@/mock/types';
+import { mapTaskStatus, type TaskItem } from '@/mock/types';
 import { getDeployLog, listDeploys, renameDeploy, stopDeploy, type DeployTaskInfo } from '@/api/deploy';
 import { useT } from '@/i18n';
 
 /** 后端部署状态 -> 详情页任务状态 */
 function toTaskItem(t: DeployTaskInfo): TaskItem {
-  const status = t.status === 'failed' ? 'FAILED' : t.status === 'stopped' ? 'STOPPED' : 'RUNNING';
+  const status = mapTaskStatus(t.status);
   /* 卡数：本机模式取卡号数，集群模式取声明的卡数；进 --nproc_per_node */
   const nproc = t.gpus?.length ?? t.gpuCount ?? 0;
   return {

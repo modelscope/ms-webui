@@ -17,6 +17,8 @@ import { defineTool, type AgentTool } from './tools';
  * start_train 合并快照与调用参数时一律剥掉——存量脏快照也在这层自愈。
  */
 const TRAIN_OWNED_KEYS = new Set([
+  /* 与 vite.config.ts 的同名集合必须同步改（前后端无法共享 import，漏一边
+   * 属地键防御就静默失效） */
   'model', 'dataset', 'val_dataset', 'tuner', 'external_plugins', 'nproc_per_node', 'output_dir',
 ]);
 
@@ -185,6 +187,8 @@ export function researchTools(conv: string, model: string): AgentTool[] {
                   eval_task_id: { type: 'string' },
                   score: { type: 'number' },
                   note: { type: 'string', description: '这轮改了什么、为什么' },
+                  evaluated_ckpt: { type: 'string', description: '服务端回读的原样带回（watcher 防重字段，不要自己编）' },
+                  last_eval_step: { type: 'integer', description: '服务端回读的原样带回（watcher 防重字段，不要自己编）' },
                 },
                 required: ['index'],
               },
@@ -217,6 +221,9 @@ export function researchTools(conv: string, model: string): AgentTool[] {
                 ...(str(x.eval_task_id) ? { evalTaskId: str(x.eval_task_id) } : {}),
                 ...(Number.isFinite(Number(x.score)) ? { score: Number(x.score) } : {}),
                 ...(str(x.note) ? { note: str(x.note) } : {}),
+                /* watcher 防重字段透传：丢了 watcher 会对同一 ckpt/step 重复起评 */
+                ...(str(x.evaluated_ckpt) ? { evaluatedCkpt: str(x.evaluated_ckpt) } : {}),
+                ...(Number.isInteger(x.last_eval_step) ? { lastEvalStep: Number(x.last_eval_step) } : {}),
               }))
           : current.iterations;
         const s = await updateResearch(id, {

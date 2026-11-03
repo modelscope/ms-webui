@@ -4,14 +4,13 @@ import { MODULES } from '@/theme/modules';
 import { PageAssistant } from '@/components/PageAssistant';
 import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
-import type { TaskItem } from '@/mock/types';
+import { mapTaskStatus, type TaskItem } from '@/mock/types';
 import { listEvals, renameEval, stopEval, type EvalTaskInfo } from '@/api/eval';
 import { useT, type MessageKey } from '@/i18n';
 
 /** 后端评测状态 -> 列表页任务状态；starting 也算运行中（正在启动链）；t 由调用方传入 */
 function toTaskItem(task: EvalTaskInfo, t: (key: MessageKey, vars?: Record<string, string | number>) => string): TaskItem {
-  const status =
-    task.status === 'failed' ? 'FAILED' : task.status === 'done' ? 'DONE' : task.status === 'stopped' ? 'STOPPED' : 'RUNNING';
+  const status = mapTaskStatus(task.status);
   return {
     id: task.id,
     type: 'eval',

@@ -1,7 +1,7 @@
 import { defineTool, type AgentTool, type ToolContext } from './tools';
 import type { PrefillModule, PrefillPayload } from '@/store/prefill';
 import { getTrainLog, listTrains, renameTrain, startTrain, stopTrain, trainTaskLabel } from '@/api/train';
-import { getEvalLog, listEvals, renameEval, stopEval } from '@/api/eval';
+import { getEvalLog, listEvals, renameEval, stopEval, type EvalTaskInfo } from '@/api/eval';
 import { getExportLog, listExports, renameExport, stopExport } from '@/api/export';
 import { listDeploys, getDeployLog, renameDeploy, stopDeploy } from '@/api/deploy';
 import { listScripts, renameScript, stopScript } from '@/api/scripts';
@@ -44,6 +44,15 @@ const scalarKv = (v: unknown): Record<string, string | number | boolean> => {
 };
 
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+
+/** 评测任务一行列表文案：完成态带逐集分数与报告路径（事实 + 建议动作同包） */
+function evalTaskLine(t: EvalTaskInfo): string {
+  const head = `- ${t.id} · ${t.status} · ${t.name ?? t.modelId}`;
+  const scores = (t.report ?? [])
+    .map((r) => `${r.dataset}: ${r.rows.find((x) => x.score !== undefined)?.score ?? '?'}`)
+    .join('，');
+  return scores ? `${head} · ${scores}（报告 ${t.resultJsonl}）` : head;
+}
 
 /** 创建类工具执行后的回喂文案：模型据此把按钮和后续选择权交代给用户 */
 function createdReply(moduleLabel: string, given: string[], missing: string[]): string {
@@ -432,15 +441,7 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
         } else if (type === 'eval') {
           const tasks = await listEvals();
           /* 事实 + 建议动作同包：完成态带逐集分数与报告路径，对账不用翻研究页 */
-          lines.push(
-            ...tasks.map((t) => {
-              const head = `- ${t.id} · ${t.status} · ${t.name ?? t.modelId}`;
-              const scores = (t.report ?? [])
-                .map((r) => `${r.dataset}: ${r.rows.find((x) => x.score !== undefined)?.score ?? '?'}`)
-                .join('，');
-              return scores ? `${head} · ${scores}（报告 ${t.resultJsonl}）` : head;
-            }),
-          );
+          lines.push(...tasks.map(evalTaskLine));
         } else if (type === 'export') {
           const tasks = await listExports();
           lines.push(...tasks.map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.model}`));
@@ -561,7 +562,8 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
 /*
  * 任务页（列表/详情）助手的工具集：只作用于本页模块。停止与删除在 webui
  * 任务表里是同一操作（DELETE = SIGTERM 终止进程；已完成任务无进程可杀，
- * 调了也只是标记 stopped），两个名字都注册、description 里把语义讲清。
+ * 调了也只是标记 stopped），两个名字都注册是有意的语义 affordance——模型
+ * 说「停掉它」和「删掉它」都落在同一端点，不要当漂移去合并。
  */
 export function moduleTaskTools(module: 'train' | 'eval' | 'export' | 'deploy' | 'script'): AgentTool[] {
   const labels: Record<typeof module, string> = {
@@ -588,13 +590,7 @@ export function moduleTaskTools(module: 'train' | 'eval' | 'export' | 'deploy' |
           module === 'train'
             ? (await listTrains()).map((t) => `- ${t.id} · ${t.status} · ${trainTaskLabel(t)}`)
             : module === 'eval'
-              ? (await listEvals()).map((t) => {
-                  const head = `- ${t.id} · ${t.status} · ${t.name ?? t.modelId}`;
-                  const scores = (t.report ?? [])
-                    .map((r) => `${r.dataset}: ${r.rows.find((x) => x.score !== undefined)?.score ?? '?'}`)
-                    .join('，');
-                  return scores ? `${head} · ${scores}（报告 ${t.resultJsonl}）` : head;
-                })
+              ? (await listEvals()).map(evalTaskLine)
               : module === 'export'
                 ? (await listExports()).map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.model}`)
                 : module === 'deploy'

@@ -33,6 +33,10 @@ export interface ResearchIteration {
   evalTaskId?: string;
   score?: number;
   note?: string;
+  /** watcher 防重字段：parallel 模式已评过的 checkpoint 名（整组回传时原样带回） */
+  evaluatedCkpt?: string;
+  /** watcher 防重字段：during 模式已记账的最后一个评测 step */
+  lastEvalStep?: number;
 }
 
 export type ResearchStatus =

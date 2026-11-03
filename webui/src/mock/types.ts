@@ -7,6 +7,18 @@
 /** 任务状态。由后端从 exit_code + 查活推导，前端只负责显示，不自己算 */
 export type TaskStatus = 'RUNNING' | 'DONE' | 'FAILED' | 'STOPPED';
 
+/*
+ * 后端小写状态 → 前端 TaskStatus 的唯一映射：五模块任务执行器共用这一组
+ * 终态语义（deploy 的成功态是 running、starting 属运行中）。列表/详情页
+ * 各自写三元链曾让「改一个枚举要动十个文件」——收口在这里，页面一行调用。
+ */
+export function mapTaskStatus(s: string): TaskStatus {
+  if (s === 'running' || s === 'starting') return 'RUNNING';
+  if (s === 'failed') return 'FAILED';
+  if (s === 'stopped') return 'STOPPED';
+  return 'DONE';
+}
+
 export type TaskType = 'train' | 'eval' | 'export' | 'deploy' | 'workflow' | 'research' | 'scripts';
 
 /** 拉起方式：只有两种，连不连 server 是 payload 属性而非 runner */
