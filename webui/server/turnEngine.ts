@@ -132,6 +132,10 @@ export interface TurnEngineHandle {
   resolveApproval(id: string, approve: boolean, alwaysAllow?: boolean): boolean;
   /** 浏览器「总是允许」同步白名单（页面侧审批通过时调用） */
   addAllowedCommand(command: string): void;
+  /** 会话是否引擎侧免审（approvals.json 持久）：页面开关如实显示的真相源 */
+  isBypassed(conv: string): boolean;
+  /** 页面开关切换即时同步（不等下一回合提交）：写入/移除 bypassConvs 并落盘 */
+  setBypass(conv: string, on: boolean): void;
 }
 
 interface ApprovalsFile {
@@ -139,8 +143,8 @@ interface ApprovalsFile {
   allowed: string[];
   /**
    * 会话级免审开关（conv id 列表）：页面勾「免审」随回合提交同步进来并持久
-   * 化——浏览器关闭后的唤醒回合同样免审，不会卡在无人可见的审批上；取消
-   * 勾选的下一回合自动移除。
+   * 化——浏览器关闭后的唤醒回合同样免审，不会卡在无人可见的审批上；页面
+   * 开关切换经 setBypass 即时增删，回合提交时的同步只是兜底。
    */
   bypassConvs: string[];
   pending: TurnApproval[];
@@ -566,6 +570,19 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
     addAllowedCommand(command) {
       if (!approvals.allowed.includes(command)) {
         approvals.allowed.push(command);
+        saveApprovals();
+      }
+    },
+    isBypassed(conv) {
+      return approvals.bypassConvs.includes(conv);
+    },
+    setBypass(conv, on) {
+      const idx = approvals.bypassConvs.indexOf(conv);
+      if (on && idx < 0) {
+        approvals.bypassConvs.push(conv);
+        saveApprovals();
+      } else if (!on && idx >= 0) {
+        approvals.bypassConvs.splice(idx, 1);
         saveApprovals();
       }
     },

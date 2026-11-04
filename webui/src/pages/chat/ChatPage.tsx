@@ -1058,34 +1058,53 @@ export function ChatPage() {
 
   /*
    * 会话级「无需审批」总闸（配置浮层里开）：开启后 requestApproval 直接放行，
-   * 覆盖 shell / 训练启动等全部审批面。记忆存 sessionStorage 按会话 id 分键：
-   * 同一会话刷新/整页 reload 后保持开启（一个会话期间稳定）；关闭标签页即
-   * 清零、切换会话按新会话 id 重读——忘关风险不出标签页。
+   * 覆盖 shell / 训练启动等全部审批面。真相源在引擎侧（approvals.json 持久，
+   * 后台唤醒回合同样生效）：进会话时如实显示、切换即时同步——持久免审对
+   * 用户始终可见可控。hero 态的 sessionStorage 键只是「下一个会话」的一次
+   * 性意图，带上即消费。
    */
   const [noApproval, setNoApprovalState] = useState(false);
   /* 轮询闭包读最新总闸态用（effect 依赖里不含 noApproval，避免重订阅） */
   const noApprovalRef = useRef(false);
   noApprovalRef.current = noApproval;
-  const prevConv = useRef('');
   useEffect(() => {
-    try {
-      /*
-       * hero（'' 键）上开的总闸是「接下来要进行的会话」的意图：从 hero 进入任一
-       * 会话（首条消息建档或点开历史）时把它带进该会话的键——否则建档那一刻的
-       * activeConv 切换会把开关静默复位，主页设了等于白设。只携带开启态、不
-       * 反向清除：会话自身记住的开启值不因路过 hero 而丢；会话与会话之间的
-       * 直接切换仍各自重读各自的键。
-       */
-      if (!prevConv.current && activeConv) {
-        if (sessionStorage.getItem('swift-webui-noapproval:') === '1') {
-          sessionStorage.setItem(`swift-webui-noapproval:${activeConv}`, '1');
-        }
+    if (!activeConv) {
+      /* hero 态：开关反映「下一个会话」的意图（sessionStorage 空后缀键） */
+      try {
+        setNoApprovalState(sessionStorage.getItem('swift-webui-noapproval:') === '1');
+      } catch {
+        setNoApprovalState(false);
       }
-      prevConv.current = activeConv;
-      setNoApprovalState(sessionStorage.getItem(`swift-webui-noapproval:${activeConv}`) === '1');
-    } catch {
-      setNoApprovalState(false);
+      return;
     }
+    let cancelled = false;
+    void (async () => {
+      try {
+        /*
+         * 开关的真相源是引擎侧的会话级免审（approvals.json 持久、后台唤醒
+         * 回合同样生效）——进会话先问引擎，如实显示（含上次会话遗留的
+         * 开启态，关标签页并不清引擎侧）。引擎侧未开启时才看 hero 意图：
+         * hero 键是「下一个会话」的一次性意图，带上即消费——长开标签页
+         * 里的后续新会话不再静默继承（免审不成为默认）。
+         */
+        const res = await fetch(`/api/headless/approvals?conv=${encodeURIComponent(activeConv)}`);
+        const r = res.ok ? ((await res.json()) as { bypass?: boolean }) : {};
+        if (cancelled) return;
+        if (r.bypass === true) {
+          setNoApprovalState(true);
+          return;
+        }
+        const hero = sessionStorage.getItem('swift-webui-noapproval:') === '1';
+        sessionStorage.removeItem('swift-webui-noapproval:');
+        setNoApprovalState(hero);
+        if (hero) sessionStorage.setItem(`swift-webui-noapproval:${activeConv}`, '1');
+      } catch {
+        if (!cancelled) setNoApprovalState(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [activeConv]);
   const setNoApproval = (v: boolean) => {
     setNoApprovalState(v);
@@ -1094,6 +1113,17 @@ export function ChatPage() {
       else sessionStorage.removeItem(`swift-webui-noapproval:${activeConv}`);
     } catch {
       /* 隐私模式等 sessionStorage 不可用：退化为纯组件态（刷新即关） */
+    }
+    /*
+     * 引擎侧即时同步，不等下一回合提交：研究会话由事件唤醒驱动、没有页面
+     * 提交可等，拖到下回合等于关不掉；开启同理立即覆盖后台唤醒回合。
+     */
+    if (activeConv) {
+      void fetch('/api/headless/approvals/bypass', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conv: activeConv, on: v }),
+      }).catch(() => undefined);
     }
   };
 

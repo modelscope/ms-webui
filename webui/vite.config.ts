@@ -6202,6 +6202,8 @@ if (req.method === 'POST' && !seg0) {
               JSON.stringify({
                 approvals: conv ? engine?.listPendingApprovals(conv) ?? [] : [],
                 allowed: engine?.listAllowedCommands() ?? [],
+                /* 会话级免审的引擎真相：页面开关进会话时如实显示 */
+                bypass: conv ? engine?.isBypassed(conv) ?? false : false,
               }),
             );
             return;
@@ -6216,6 +6218,20 @@ if (req.method === 'POST' && !seg0) {
               return;
             }
             engine?.addAllowedCommand(command);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (req.method === 'POST' && seg0 === 'bypass') {
+            const body = (await readJsonBody(req)) as { conv?: string; on?: boolean };
+            const conv = String(body.conv ?? '').trim();
+            if (!conv) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'conv 必填' }));
+              return;
+            }
+            engine?.setBypass(conv, body.on === true);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ ok: true }));
             return;
