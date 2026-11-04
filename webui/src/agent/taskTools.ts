@@ -1,4 +1,5 @@
 import { defineTool, type AgentTool, type ToolContext } from './tools';
+import { clipFeedback } from './builtin';
 import type { PrefillModule, PrefillPayload } from '../store/prefill';
 import { getTrainLog, listTrains, renameTrain, startTrain, stopTrain, trainTaskLabel } from '../api/train';
 import { getEvalLog, listEvals, renameEval, stopEval, type EvalTaskInfo } from '../api/eval';
@@ -536,8 +537,12 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
                   : null;
         if (!lines) return `未知任务类型: ${type}`;
         const slice = lines.slice(-tail);
+        /* 训练/评测日志行密且长，500 行上限仍可能上万字符——与 read_script_log 同构套回喂截断 */
         return slice.length
-          ? `${type} 任务 ${id} 日志最近 ${slice.length}/${lines.length} 行：\n${slice.join('\n')}`
+          ? clipFeedback(
+              `${type} 任务 ${id} 日志最近 ${slice.length}/${lines.length} 行：\n${slice.join('\n')}`,
+              '任务日志 ',
+            )
           : `${type} 任务 ${id} 日志为空（可能刚创建，或收编恢复中）。`;
       } catch (e) {
         return `日志读取失败: ${String(e)}`;

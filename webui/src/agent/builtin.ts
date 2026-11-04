@@ -61,8 +61,8 @@ function formatSearchHits(hits: SearchHit[]): string {
  */
 const FEEDBACK_LIMIT = 8192;
 
-/** 探查类输出回喂截断：头 6KB + 尾 1.5KB，中段换成省略说明 */
-function clipFeedback(text: string, label: string): string {
+/** 探查类输出回喂截断：头 6KB + 尾 1.5KB，中段换成省略说明（taskTools 也复用） */
+export function clipFeedback(text: string, label: string): string {
   if (text.length <= FEEDBACK_LIMIT) return text;
   const head = text.slice(0, 6144);
   const tail = text.slice(-1536);
@@ -218,10 +218,13 @@ export function workspaceTools(conv?: string, modelId?: string): AgentTool[] {
           if (!matches.length) {
             return `没有命中（扫描 ${r.scanned ?? 0} 个文件）。换更宽的 pattern 或扩大 path 范围。`;
           }
-          return [
-            `${matches.length} 处命中${r.truncated ? '（已截断：缩小 path 范围或收紧 pattern）' : ''}（扫描 ${r.scanned ?? 0} 个文件）：`,
-            ...matches,
-          ].join('\n');
+          return clipFeedback(
+            [
+              `${matches.length} 处命中${r.truncated ? '（已截断：缩小 path 范围或收紧 pattern）' : ''}（扫描 ${r.scanned ?? 0} 个文件）：`,
+              ...matches,
+            ].join('\n'),
+            'grep 命中 ',
+          );
         } catch (e) {
           return String(e instanceof Error ? e.message : e);
         }
@@ -310,7 +313,10 @@ export function workspaceTools(conv?: string, modelId?: string): AgentTool[] {
       async (args) => {
         const root = args.root === 'external' ? 'external' : 'workspace';
         const r = await fsTool({ op: 'list', path: String(args.path ?? '') || '.', root });
-        return (r.entries ?? []).map((e) => `${e.name}${e.dir ? '/' : ''}`).join('\n');
+        return clipFeedback(
+          (r.entries ?? []).map((e) => `${e.name}${e.dir ? '/' : ''}`).join('\n'),
+          '目录清单 ',
+        );
       },
     ),
     defineTool(
@@ -496,7 +502,7 @@ export const WORKBENCH_GUIDE = [
   '- 找数据集/模型候选用 list_catalog（swift 注册表全量，数据集带标签与热度、模型带 model_type；cached 标记已在本机）：先搜再问；ModelScope 平台与 Hub 操作先用 read_skill 读 ms-hub/SKILL.md 再动手。',
   '- 模型必须由用户指定（hub id 或本地路径）：缺了就把 list_catalog 的候选摆给用户挑，不要猜。',
   '- 算力规划用 env_info 查本地 GPU 清单与 swift 环境：本地训练的卡数决定 nproc_per_node（create_train 的 gpus 传卡号列表）；远端/集群资源只声明卡数（gpu_count），不传本机卡号。',
-  '- 环境事实一次拿全：GPU/卡数、模型缓存根与已缓存模型、swift 与 evalscope 的版本可用性、python 解释器，全在 env_info 的返回里——不要为这些写 probe 脚本或连环 shell 探测（每条都要审批还烧轮次）；模板渲染、数据字段这类 swift 行为问题用 read_swift_source 仲裁。把精力放在数据集选择、模型选择、训练构型、实验设计、算法与指标设计上。',
+  '- 环境事实一次拿全：GPU/卡数、swift 与 evalscope 的版本可用性、python 解释器，全在 env_info 的返回里——不要为这些写 probe 脚本或连环 shell 探测（每条都要审批还烧轮次）；模型/数据集直接填 hub id（或本地路径），下载按 ModelScope 缓存去重、已存在即跳过，无须查本地缓存；模板渲染、数据字段这类 swift 行为问题用 read_swift_source 仲裁。把精力放在数据集选择、模型选择、训练构型、实验设计、算法与指 标设计上。',
   '- 需要用户的原始数据时，先问清数据格式与存放路径：路径在工作空间外就请用户在「偏好设置 → 外部数据目录」里登记（只读），然后用 dataset_profile/read_file/list_dir 的 root="external" 探查；大文件的分析用 shell 的 head/wc/jq（不受工作空间限制）。',
   '- 前处理、数据分析这类长脚本：write_file 写进工作空间后用 run_script 后台执行（shell 有 30 秒超时）。脚本完成后会自动通知回本对话——启动后回合可以自然收尾等通知，中途诊断（怀疑跑偏/失败归因）才用 read_script_log，不要反复轮询进度；修改已有文件用 edit_file  精确替换，不要 sed。',
   '- 数据探查第一步用 dataset_profile（一次拿行数/列名/抽样/字段分布，支持外部数据根）；它覆盖不了的更复杂统计（关系配对、交叉校验）才合并成一个综合脚本 run_script 跑完，输出只留汇总统计与少量样例（几十行）；不要连环小步 shell 逐步摸——每轮工具结果都进历史且逐轮重发，连环探查的 token 成本是轮数 × 上下文大小双倍放大。探查脚本的 print 自觉控制在汇总级，全量明细落文件、按需取片段。',
@@ -616,7 +622,13 @@ export function listCatalogTool(): AgentTool {
   );
 }
 
-/** 运行环境工具：env_info。GPU + swift 版本/路径 + python，规划分片前先查这个 */
+/**
+ * 运行环境工具：env_info。GPU + swift 版本/路径 + python，规划分片前先查这个。
+ * 基准参考分两步：无参报名清单（选基准用），带 benchmark 参数查单个基准的
+ * subset 值域（构造 --eval_dataset_args 用）。拆开是因为全量值域上百个基准
+ * 约 2 万多字符——一次塞进返回会几轮工具就把单回合上下文预算顶穿，而选
+ * 基准时只需要名字、选定后才需要那一个的值域。
+ */
 export function envInfoTool(): AgentTool {
   return defineTool(
     {
@@ -625,14 +637,38 @@ export function envInfoTool(): AgentTool {
         name: 'env_info',
         description:
           '查询运行环境：本地 GPU 清单（卡号/型号/显存占用）、swift 版本与安装路径、python 解释器、' +
-          'evalscope 可用基准全名单（--eval_dataset / evalPlan 只认其中的精确名）。' +
+          'evalscope 可用基准名清单（--eval_dataset / evalPlan 只认其中的精确名）。' +
+          '传 benchmark 参数时改查该基准的 subset 值域（选定评测集后再查，不要无参拿全量值域）。' +
           '规划训练/部署的用卡与并行度、选定评测数据集前先查这个，不要用 nvidia-smi 等命令探测',
-        parameters: { type: 'object', properties: {} },
+        parameters: {
+          type: 'object',
+          properties: {
+            benchmark: { type: 'string', description: '要查 subset 值域的基准名（来自无参返回的名清单）' },
+          },
+        },
       },
     },
-    async () => {
+    async (args: { benchmark?: string } = {}) => {
       try {
         const env = await envInfo();
+        /* 带参：单基准的 subset 值域（体积大，按需给） */
+        if (args.benchmark) {
+          const name = String(args.benchmark).trim();
+          if (!env.benchmarks) {
+            return 'evalscope 基准注册表暂不可达（需要 subset 值域时先跑一条只读命令核对）';
+          }
+          const subsets = env.benchmarks[name];
+          if (!subsets) {
+            return `基准「${name}」不在注册表里；先无参调 env_info 拿基准名清单，用其中的精确名重查`;
+          }
+          return subsets.length
+            ? [
+                `${name} 的 subset 可选（${subsets.length} 个）：`,
+                subsets.join(' | '),
+                `subset 透传示例：--eval_dataset_args '{"${name}":{"subset_list":["${subsets[0]}"]}}'`,
+              ].join('\n')
+            : `${name}（无 subset，直接用基准名即可）`;
+        }
         const gpuLines = env.gpus.length
           ? env.gpus.map((g) => `- 卡 ${g.index}: ${g.name}，显存 ${g.used}/${g.total} MiB`).join('\n')
           : '（无可见 GPU 或驱动不可用）';
@@ -643,22 +679,15 @@ export function envInfoTool(): AgentTool {
           `python: ${env.python}`,
           `evalscope: ${env.evalscope ? env.evalscope.version : '未安装（评测链需自建 harness 或先安装）'}`,
           env.benchmarks
-            ? (() => {
-                const entries = Object.entries(env.benchmarks);
-                const benchLines = entries.map(([name, subsets]) =>
-                  subsets.length ? `- ${name}：subset 可选 ${subsets.join(' | ')}` : `- ${name}（无 subset）`,
-                );
-                return [
-                  `evalscope 可用基准（${entries.length} 个，--eval_dataset 只认这些精确名；subset 用 --eval_dataset_args 透传）：`,
-                  ...benchLines,
-                  `subset 透传示例：--eval_dataset_args '{"live_code_bench":{"subset_list":["release_v6"]}}'`,
-                ].join('\n');
-              })()
-            : 'evalscope 基准注册表暂不可达（需要 --eval_dataset 时先跑一条只读命令核对名字）',
-          `模型缓存根: ${env.modelCache}`,
-          env.cachedModels.length ? `已缓存模型: ${env.cachedModels.join('、')}` : '已缓存模型: （无）',
+            ? [
+                `evalscope 可用基准（${Object.keys(env.benchmarks).length} 个，--eval_dataset / evalPlan 只认这些精确名；subset 用 --eval_dataset_args 透传）：`,
+                Object.keys(env.benchmarks).join('、'),
+                '选定后查该基准的 subset 值域：env_info {"benchmark":"基准名"}；' +
+                  '透传示例：--eval_dataset_args \'{"live_code_bench":{"subset_list":["release_v6"]}}\'',
+              ].join('\n')
+            : 'evalscope 基准注册表暂不可达（需要 --eval_dataset 时先跑一条只读 命令核对名字）',
           '本地训练的 nproc_per_node 应等于所选卡数；远端/集群资源只声明卡数。',
-          '以上即本机环境的全部权威事实——不要再写 probe 脚本探测它们（GPU/缓存路径/依赖版本均已在此），把精力放在数据、模型与实验设计上。',
+          '以上即本机环境的全部权威事实——不要再写 probe 脚本探测它们（GPU/依赖版本均已在此），把精力放在数据、模型与实验设计上。',
         ].join('\n');
       } catch (e) {
         return `环境读取失败: ${String(e instanceof Error ? e.message : e)}`;
@@ -705,7 +734,11 @@ export function readSwiftSourceTool(): AgentTool {
       const limit = Number.isInteger(args.limit) && Number(args.limit) > 0 ? Number(args.limit) : undefined;
       try {
         const r = await fsTool({ op, path, root: 'swift', ...(offset ? { offset } : {}), ...(limit ? { limit } : {}) });
-        if (op === 'list') return (r.entries ?? []).map((e) => `${e.name}${e.dir ? '/' : ''}`).join('\n') || '(空目录)';
+        if (op === 'list')
+          return clipFeedback(
+            (r.entries ?? []).map((e) => `${e.name}${e.dir ? '/' : ''}`).join('\n') || '(空目录)',
+            '包目录清单 ',
+          );
         /*
          * 行范围元信息头 + 截断守卫，与 read_file 同构：源码文件动辄上千行，
          * 无范围整读一次上万字符进历史且逐轮重发（实测回执量榜首）。

@@ -77,8 +77,8 @@ export function researchTools(conv: string, model: string): AgentTool[] {
             eval_dataset: {
               type: 'string',
               description:
-                '评测数据。evalscope 通道必须填注册表精确名（全名单与各基准的 subset 值域用 env_info 工具查' +
-                '「可用基准」一节，小写下划线形，如 live_code_bench / humaneval / mbpp / gsm8k）——limit 走单独' +
+                '评测数据。evalscope 通道必须填注册表精确名（全名单用 env_info 工具查「可用基准」一' +
+                '节，选定后 env_info {"benchmark":"名"} 查该基准的 subset 值域，小写下划线形，如 live_code_bench / humaneval / mbpp / gsm8k）——limit 走单独' +
                 '参数；需要特定版本/subset 时写成「精确名 (subset)」注记（如 live_code_bench (release_v6)），' +
                 '平台会拆成注册名 + subset_list 经 --eval_dataset_args 透传，不会丢语义。自定义 held-out 数据集' +
                 '走 custom 判分通道。',

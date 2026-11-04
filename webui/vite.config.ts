@@ -3747,9 +3747,6 @@ function swiftApiPlugin(): Plugin {
               evalscope,
               /* evalscope 基准注册表：名 → subset 值域（--eval_dataset 合法名 + subset_list 可选值；null=探测不可达） */
               benchmarks,
-              /* 模型缓存根 + 已缓存清单：自建评测/部署要磁盘权重路径，别再逐层 find */
-              modelCache: modelCacheRoot(),
-              cachedModels: cachedHubModels(),
             }),
           );
         } catch (e) {

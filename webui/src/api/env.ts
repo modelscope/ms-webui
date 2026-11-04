@@ -18,10 +18,6 @@ export interface EnvInfo {
    * subset_list 可选值；null = 探测不可达）。subset 经 --eval_dataset_args 透传。
    */
   benchmarks: Record<string, string[]> | null;
-  /** 模型缓存根目录（MODELSCOPE_CACHE 可改默认位置） */
-  modelCache: string;
-  /** 已落本机缓存的模型（org/name 形态）：起 vllm/部署需要磁盘权重路径 */
-  cachedModels: string[];
 }
 
 export async function envInfo(): Promise<EnvInfo> {
