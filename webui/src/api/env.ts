@@ -13,8 +13,11 @@ export interface EnvInfo {
   swift: { version: string; path: string } | null;
   /** evalscope 安装探测（null = 未装）：模型搭评测链前先看这里 */
   evalscope: { version: string } | null;
-  /** evalscope 基准注册表全名单（--eval_dataset 的合法值域；null = 探测不可达） */
-  benchmarks: string[] | null;
+  /**
+   * evalscope 基准注册表：名 → subset 值域（--eval_dataset 的合法名 +
+   * subset_list 可选值；null = 探测不可达）。subset 经 --eval_dataset_args 透传。
+   */
+  benchmarks: Record<string, string[]> | null;
   /** 模型缓存根目录（MODELSCOPE_CACHE 可改默认位置） */
   modelCache: string;
   /** 已落本机缓存的模型（org/name 形态）：起 vllm/部署需要磁盘权重路径 */

@@ -832,6 +832,38 @@ interface ProfileResult {
   truncated: boolean;
 }
 
+/** 单行 CSV 解析（RFC4180 引号/成对双引号转义）；返回 null = 行尾引号未闭合（跨行字段，需缓冲拼接） */
+function parseCsvLine(line: string, delimiter: string): string[] | null {
+  const values: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === delimiter) {
+      values.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (inQuotes) return null;
+  values.push(cur);
+  return values;
+}
+
 const PROFILE_COLUMN_SAMPLE = 500;
 const PROFILE_SAMPLE_COUNT = 3;
 const PROFILE_STATS_CAP = 5000;
@@ -849,6 +881,7 @@ function profileFile(abs: string, field?: string): Promise<ProfileResult> {
       samples: [],
       truncated: false,
     };
+    let csvBuffer: string | null = null;
     const counts = new Map<string, number>();
     const deadline = Date.now() + 8000;
     const rl = createInterface({ input: createReadStream(abs, { encoding: 'utf-8' }), crlfDelay: Infinity });
@@ -868,7 +901,15 @@ function profileFile(abs: string, field?: string): Promise<ProfileResult> {
           result.badRows += 1;
         }
       } else {
-        const values = line.split(delimiter);
+        /*
+         * csv：RFC4180 引号状态机——引号内的分隔符/换行/成对双引号都是字段
+         * 内容，跨行字段靠缓冲拼接（parseCsvLine 返回 null 表示引号未闭合）。
+         * tsv 没有引号转义语义，直接按分隔符切。
+         */
+        csvBuffer = csvBuffer === null ? line : `${csvBuffer}\n${line}`;
+        const values = ext === '.csv' ? parseCsvLine(csvBuffer, delimiter) : csvBuffer.split(delimiter);
+        if (values === null) return; /* 跨行字段：继续缓冲下一物理行 */
+        csvBuffer = null;
         /* csv/tsv：第一行当表头，之后每行按列位置映射成记录 */
         if (result.columns.length === 0) {
           if (line.trim()) result.columns = values.map((c) => c.trim());
@@ -1172,6 +1213,8 @@ interface EvalItem {
   dataset: string;
   /** 只评前 N 条；undefined = 全量 */
   limit?: number;
+  /** 逐集 dataset_args（subset_list 版本透传等）：JSON 序列化进 --eval_dataset_args */
+  datasetArgs?: Record<string, unknown>;
 }
 
 interface EvalTask {
@@ -1300,6 +1343,7 @@ async function runEvalChain(task: EvalTask): Promise<void> {
       ...(task.local?.adapters?.length ? ['--adapters', ...task.local.adapters] : []),
       ...(task.local ? [] : ['--eval_url', task.baseUrl]),
       '--eval_dataset', item.dataset,
+      ...(item.datasetArgs ? ['--eval_dataset_args', JSON.stringify(item.datasetArgs)] : []),
       '--eval_output_dir', task.outputDir,
       '--result_jsonl', task.resultJsonl,
       ...(task.plugins?.length ? ['--external_plugins', ...task.plugins] : []),
@@ -1311,7 +1355,7 @@ async function runEvalChain(task: EvalTask): Promise<void> {
       task,
       `$ [${item.dataset}] ${resolvePython()} -m swift.dev.cli.eval --model ${model}` +
         `${task.local?.adapters?.length ? ` --adapters ${task.local.adapters.join(' ')}` : ''}` +
-        `${task.local ? '' : ` --eval_url ${task.baseUrl}`} --eval_dataset ${item.dataset}${item.limit ? ` --eval_limit ${item.limit}` : ''}`,
+        `${task.local ? '' : ` --eval_url ${task.baseUrl}`} --eval_dataset ${item.dataset}${item.limit ? ` --eval_limit ${item.limit}` : ''}${item.datasetArgs ? ` --eval_dataset_args ${JSON.stringify(item.datasetArgs)}` : ''}`,
     );
     const code = await new Promise<number>((resolvePromise) => {
       const proc = spawn(resolvePython(), args, {
@@ -2488,6 +2532,13 @@ function listTrainCheckpoints(outputDir: string): Array<{ name: string; mtimeMs:
   }
 }
 
+/** 访谈自由文本的评测身份归一化：「live_code_bench (release_v6)」→ 注册名 + subset */
+function parseEvalDataset(raw: string): { name: string; subset?: string } {
+  const m = raw.trim().match(/^(.+?)\s*[(（]([^()（）]+)[)）]\s*$/);
+  if (m && m[1].trim()) return { name: m[1].trim(), subset: m[2].trim() };
+  return { name: raw.trim() };
+}
+
 /** 评测报告里取分：dataset 行内先按 metric 名找，兜底行级 score */
 function extractEvalScore(
   report: { dataset: string; rows: unknown[] }[] | undefined,
@@ -2532,25 +2583,24 @@ function startResearchEval(session: ResearchSession, adapters: string, gpus?: nu
   const dir = join(swiftHome(), 'eval', id);
   mkdirSync(dir, { recursive: true });
   /*
-   * dataset 名归一化：evalPlan.metric.dataset 是模型访谈阶段起的自由文本
-   * （如「live_code_bench (release_v6)」——括号是版本注记），而 swift eval 的
-   * --eval_dataset 要求 EvalScope 注册表精确名（live_code_bench）。剥掉尾部
-   * 括号注记再传；名字本身仍由 CLI 的 fail-loudly 校验兜底（失败事件带
-   * 完整 supported 清单）。注：evalscope 的 live_code_bench 是固化的 lite
-   * 版，括号里的版本注记无法精确表达（要精确版本走自建 harness 的 custom
-   * 通道），此处只保「名字合法、评测能跑」。
+   * dataset 身份结构化：访谈自由文本里的「name (subset)」注记拆成注册名 +
+   * subset_list 透传（--eval_dataset_args）——剥注记会丢语义（live_code_bench
+   * 剥掉 release_v6 就评成固化 lite 默认版），取分也对不回原名。启动与取分
+   * 共用 parseEvalDataset，同一份归一化。
    */
-  const dataset = session.evalPlan.metric.dataset.replace(/\s*[(（][^)）]*[)）]\s*$/, '').trim();
+  const parsed = parseEvalDataset(session.evalPlan.metric.dataset);
+  const datasetArgs = parsed.subset ? { [parsed.name]: { subset_list: [parsed.subset] } } : undefined;
   const task: EvalTask = {
     id,
     modelId: `research:${session.id}`,
-    name: `研究 ${session.id.slice(-6)} · ${dataset}`,
+    name: `研究 ${session.id.slice(-6)} · ${parsed.name}${parsed.subset ? ` (${parsed.subset})` : ''}`,
     model: session.baseModel,
     baseUrl: '',
     items: [
       {
-        dataset,
+        dataset: parsed.name,
         ...(session.evalPlan.metric.limit ? { limit: session.evalPlan.metric.limit } : {}),
+        ...(datasetArgs ? { datasetArgs } : {}),
       },
     ],
     current: 0,
@@ -2813,7 +2863,7 @@ async function watchResearchEval(session: ResearchSession): Promise<void> {
     return;
   }
   if (task.status !== 'done') return;
-  const score = extractEvalScore(task.report, session.evalPlan.metric.dataset, session.evalPlan.metric.metricName);
+  const score = extractEvalScore(task.report, parseEvalDataset(session.evalPlan.metric.dataset).name, session.evalPlan.metric.metricName);
   await finalizeResearchIteration(session, it.index, score, '评测完成');
 }
 
@@ -3127,36 +3177,60 @@ function probeEvalscope(): Promise<{ version: string } | null> {
 }
 
 /*
- * evalscope 基准注册表清单：--eval_dataset 只认这里的精确名，访谈/建模时
- * 模型要拿全名单才不会把版本注记拼进名字（live_code_bench (release_v6) 事故）。
- * import evalscope 首次要几秒，进程内缓存只探一次；失败返回 null 不阻塞。
+ * evalscope 基准注册表（名 → subset 值域）：--eval_dataset 只认精确名、版本
+ * 注记走 --eval_dataset_args 的 subset_list 透传（live_code_bench (release_v6)
+ * 事故）。import evalscope 首次要几秒；成功结果按解释器缓存（切 python 重探），
+ * 失败不缓存——返回 null 只表示此刻不可达，不把一次抖动固化成永久失败。
  */
-let benchmarksCache: Promise<string[] | null> | null = null;
-function probeBenchmarks(): Promise<string[] | null> {
-  if (!benchmarksCache) {
-    benchmarksCache = new Promise((resolvePromise) => {
-      const proc = spawn(
-        resolvePython(),
-        ['-c', 'from evalscope.api.registry import BENCHMARK_REGISTRY; print(" ".join(sorted(BENCHMARK_REGISTRY)))'],
-        { stdio: ['ignore', 'pipe', 'pipe'] },
-      );
-      let out = '';
-      const timer = setTimeout(() => proc.kill('SIGKILL'), 90_000);
-      proc.stdout?.on('data', (b: Buffer) => {
-        out += b.toString('utf-8');
-      });
-      proc.on('error', () => {
-        clearTimeout(timer);
-        resolvePromise(null);
-      });
-      proc.on('close', () => {
-        clearTimeout(timer);
-        const names = out.split(/\s+/).map((s) => s.trim()).filter(Boolean);
-        resolvePromise(names.length ? names : null);
-      });
+let benchmarksCache: Record<string, string[]> | null = null;
+let benchmarksCachePython: string | null = null;
+let benchmarksInflight: Promise<Record<string, string[]> | null> | null = null;
+function probeBenchmarks(): Promise<Record<string, string[]> | null> {
+  if (benchmarksCache !== null && benchmarksCachePython === resolvePython()) return Promise.resolve(benchmarksCache);
+  if (benchmarksInflight) return benchmarksInflight;
+  let resolveInflight: (v: Record<string, string[]> | null) => void = () => undefined;
+  const finish = (v: Record<string, string[]> | null): void => {
+    benchmarksInflight = null;
+    if (v !== null) {
+      benchmarksCache = v;
+      benchmarksCachePython = resolvePython();
+    }
+    resolveInflight(v);
+  };
+  benchmarksInflight = new Promise((r) => {
+    resolveInflight = r;
+    const proc = spawn(
+      resolvePython(),
+      [
+        '-c',
+        'import json\nfrom evalscope.api.registry import BENCHMARK_REGISTRY\nprint(json.dumps({k: sorted(getattr(m, "subset_list", None) or []) for k, m in BENCHMARK_REGISTRY.items()}))',
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let out = '';
+    const timer = setTimeout(() => proc.kill('SIGKILL'), 90_000);
+    proc.stdout?.on('data', (b: Buffer) => {
+      out += b.toString('utf-8');
     });
-  }
-  return benchmarksCache;
+    proc.on('error', () => {
+      clearTimeout(timer);
+      finish(null);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        finish(null);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(out.trim()) as Record<string, string[]>;
+        finish(parsed && typeof parsed === 'object' ? parsed : null);
+      } catch {
+        finish(null);
+      }
+    });
+  });
+  return benchmarksInflight;
 }
 
 /*
@@ -3426,16 +3500,22 @@ function swiftApiPlugin(): Plugin {
             if (engine.busyConv(session.convId)) continue;
             const m = loadModels().find((x) => x.id === session.modelId);
             if (!m?.baseUrl || !m?.apiKey) continue; /* MS token 模型：事件留队 */
-            const researchEvents = session.events?.length ? await takeResearchEvents(session.id) : [];
-            const scriptEvents = takeConvEvents(session.convId);
-            if (!researchEvents.length && !scriptEvents.length) continue;
-            const text = [
-              ...(researchEvents.length ? [composeWakeupMessage(session, researchEvents)] : []),
-              ...(scriptEvents.length ? [composeScriptWakeupMessage(scriptEvents)] : []),
-            ].join('\n\n');
-            console.log(`[turn] 唤醒 ${session.id}（${researchEvents.length} 研究事件 + ${scriptEvents.length} 脚本事件）`);
-            handledConvs.add(session.convId);
-            engine.runWakeupTurn(session.convId, session.modelId, text);
+            /*
+             * 事件取走挪进引擎占锁之后的 prepare：tick 与页面提交的竞态窗口
+             * 里事件不会被「取走后丢弃」（runWakeupTurn 返回 false = 未取未跑，
+             * 事件留队下一拍重试）。
+             */
+            const accepted = engine.runWakeupTurn(session.convId, session.modelId, async () => {
+              const researchEvents = session.events?.length ? await takeResearchEvents(session.id) : [];
+              const scriptEvents = takeConvEvents(session.convId);
+              if (!researchEvents.length && !scriptEvents.length) return '';
+              console.log(`[turn] 唤醒 ${session.id}（${researchEvents.length} 研究事件 + ${scriptEvents.length} 脚本事件）`);
+              return [
+                ...(researchEvents.length ? [composeWakeupMessage(session, researchEvents)] : []),
+                ...(scriptEvents.length ? [composeScriptWakeupMessage(scriptEvents)] : []),
+              ].join('\n\n');
+            });
+            if (accepted) handledConvs.add(session.convId);
           }
           /*
            * 非研究会话的积压脚本事件（普通对话里模型自己跑的后台脚本完成）：
@@ -3449,10 +3529,12 @@ function swiftApiPlugin(): Plugin {
             if (engine.busy(conv, model)) continue;
             const m = loadModels().find((x) => x.id === model);
             if (!m?.baseUrl || !m?.apiKey) continue;
-            const scriptEvents = takeConvEvents(conv);
-            if (!scriptEvents.length) continue;
-            console.log(`[turn] 唤醒 ${conv}（${scriptEvents.length} 脚本事件）`);
-            engine.runWakeupTurn(conv, model, composeScriptWakeupMessage(scriptEvents));
+            /* 事件取走放进引擎锁内（同上：占锁失败 = 事件未取，零丢失） */
+            engine.runWakeupTurn(conv, model, () => {
+              const scriptEvents = takeConvEvents(conv);
+              console.log(`[turn] 唤醒 ${conv}（${scriptEvents.length} 脚本事件）`);
+              return Promise.resolve(composeScriptWakeupMessage(scriptEvents));
+            });
           }
         })();
       }, 5000);
@@ -3588,7 +3670,7 @@ function swiftApiPlugin(): Plugin {
               python: resolvePython(),
               swift,
               evalscope,
-              /* evalscope 基准注册表全名单（--eval_dataset 的合法值域；null=不可达） */
+              /* evalscope 基准注册表：名 → subset 值域（--eval_dataset 合法名 + subset_list 可选值；null=探测不可达） */
               benchmarks,
               /* 模型缓存根 + 已缓存清单：自建评测/部署要磁盘权重路径，别再逐层 find */
               modelCache: modelCacheRoot(),

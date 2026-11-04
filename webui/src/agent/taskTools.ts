@@ -18,7 +18,8 @@ import { listScripts, renameScript, stopScript } from '../api/scripts';
 /** 首页场景的 system 注入：引导先收集参数再调工具 */
 export const HOME_SYSTEM =
   '你可以通过工具操作这个 swift 工作台：创建训练/评测/导出/部署任务、批量启动消融实验、列出现有任务、停止任务。' +
-  'create_* 是填参类：调用后回复区会出现「前往查看」按钮，由用户自己决定点它跳到目标页启动还是继续对话调整——不要代替用户跳转，把按钮的事告诉用户即可。' +
+  'create_* 是填参类：页面会话里调用后回复区会出现「前往查看」按钮，由用户自己决定点它跳到目标页启动还是继续对话调整——不要代替用户跳转，把按钮的事告诉用户即可。' +
+  '注意：服务端后台唤醒回合（无页面在听）里调用 create_* 不会出现按钮，回执会说明这一点——把整理好的参数转告用户即可，不要声称按钮已出现。' +
   '要一次跑多个训练（消融实验，共享基础配置只变差异点）用 start_train_batch：一次审批后全部立即启动。' +
   '调用前先把必要参数收集齐（模型、数据集等），缺的就先问用户，不要拿猜测值填。' +
   '停止任务与批量启动属于立即执行类操作，会先弹审批卡等用户确认。';
@@ -55,7 +56,29 @@ function evalTaskLine(t: EvalTaskInfo): string {
 }
 
 /** 创建类工具执行后的回喂文案：模型据此把按钮和后续选择权交代给用户 */
-function createdReply(moduleLabel: string, given: string[], missing: string[]): string {
+function createdReply(
+  moduleLabel: string,
+  given: string[],
+  missing: string[],
+  hasButton: boolean,
+  fields?: Record<string, unknown>,
+): string {
+  /*
+   * hasButton=false（服务端唤醒回合，无 onCreate 上抛通道）时不能声称按钮
+   * 已出现——诚实回执 + 参数载荷，由模型转告用户或等页面回合再建。
+   */
+  if (!hasButton) {
+    const payload = JSON.stringify(fields ?? {});
+    const shown = payload.length > 2000 ? `${payload.slice(0, 2000)}…（截断）` : payload;
+    return [
+      `已整理好新建${moduleLabel}的参数${given.length ? `（${given.join('、')}）` : ''}。`,
+      missing.length ? `还没提供的参数：${missing.join('、')}——补齐后用户在对应页面创建时更顺。` : '',
+      '本回合在后台执行（没有页面在听），不会出现「前往查看」按钮；请把上述参数转告用户，由用户在对应页面创建并启动，或等用户打开对话后再创建。',
+      `参数载荷：${shown}`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
   return [
     `已准备好新建${moduleLabel}配置${given.length ? `（${given.join('、')}）` : ''}，回复区出现了「前往查看」按钮。`,
     missing.length ? `还没提供的参数：${missing.join('、')}——用户可以点按钮到页面上补填，也可以继续在对话里告诉你。` : '',
@@ -65,7 +88,6 @@ function createdReply(moduleLabel: string, given: string[], missing: string[]): 
     .join('\n');
 }
 
-/** create_* 上抛给页面的跳转意图：工具只备好载荷，点击按钮才落预填并跳转 */
 export interface CreatedLink {
   /** 目标 New 页的模块（预填通道按模块分键） */
   module: PrefillModule;
@@ -115,7 +137,7 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
             },
           },
         });
-        return createdReply(moduleLabel, given, missing);
+        return createdReply(moduleLabel, given, missing, onCreate !== undefined, fields);
       },
     );
 

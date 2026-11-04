@@ -23,6 +23,8 @@ export interface EvalItem {
   dataset: string;
   /** 只评前 N 条；undefined = 全量 */
   limit?: number;
+  /** 逐集 dataset_args（subset_list 版本透传等）：JSON 序列化进 --eval_dataset_args */
+  datasetArgs?: Record<string, unknown>;
 }
 
 /** 本地直评目标：--model 底座 + --adapters checkpoint，不连端点（autoresearch 主用，评测页可手填） */

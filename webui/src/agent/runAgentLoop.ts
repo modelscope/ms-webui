@@ -1,5 +1,6 @@
 import { streamChat, type ChatMessage, type DeltaParts, type ToolCall } from '../api/models';
 import { MAX_TOOL_ROUNDS } from './builtin';
+import { estimateTokens } from './history';
 import { executeToolCall, toolSchemas, type AgentTool, type ToolContext } from './tools';
 
 /**
@@ -43,6 +44,13 @@ export interface AgentLoopOptions {
   ctx: ToolContext;
   sampling?: { temperature?: number; topP?: number; maxTokens?: number };
   /**
+   * 单回合 history 的硬预算（token 估算）：长工具链会不断把结果追加进
+   * history，不设上限时几十轮大结果会把请求体顶穿模型上下文。超限只截短
+   * 发给模型的旧工具结果（保头尾 + 续读指路），落盘与渲染的完整原文不受
+   * 影响。不传用默认。
+   */
+  historyBudgetTokens?: number;
+  /**
    * 展览模式的会话 token：随请求头带给服务端鉴权（默认模型不在 models.json，
    * 服务端无处可查 key）。正常形态不传。
    */
@@ -53,19 +61,59 @@ export interface AgentLoopOptions {
    * 工具轮。正在执行的工具任其跑完——半途掐断写操作比让它落完更糟。
    */
   signal?: AbortSignal;
+  /** 发起回合的会话 id（页面回合传）：透传给代理中间件做中断回合登记 */
+  convId?: string;
   events: AgentLoopEvents;
+}
+
+/** 单回合 history 的默认硬预算（对齐 history.ts 的上下文假设，留出输出余量） */
+const DEFAULT_HISTORY_BUDGET_TOKENS = 26000;
+/** 预算截短的触发粒度：短于此的工具结果不值得截（截了也省不出多少） */
+const TRIM_MIN_CHARS = 2000;
+
+/**
+ * 预算截短：超限时从最旧的工具结果开始保头尾（各 1200/800 字符）、中段
+ * 换成省略说明与重取指路，直到回到预算内。只改发给模型的 history——
+ * 落盘/渲染由调用方逐条持久化（events.onToolResult），原文不受影响。
+ */
+function trimHistoryForBudget(
+  history: ChatMessage[],
+  budgetTokens: number,
+  notice: (text: string) => void,
+): ChatMessage[] {
+  if (estimateTokens(history) <= budgetTokens) return history;
+  const out = history.map((m) => ({ ...m }));
+  let trimmed = 0;
+  for (let i = 0; i < out.length && estimateTokens(out) > budgetTokens; i++) {
+    const m = out[i];
+    /* 已截短过的不再二截（保头尾再保头尾就只剩说明文字了） */
+    if (m.role !== 'tool' || m.content.length <= TRIM_MIN_CHARS || m.content.includes('预算截短：')) continue;
+    const head = m.content.slice(0, 1200);
+    const tail = m.content.slice(-800);
+    out[i] = {
+      ...m,
+      content: `${head}\n…（预算截短：中段约 ${m.content.length - head.length - tail.length} 字符已省略，完整内容在对话记录里，可用读取工具带 offset/limit 重新获取）\n${tail}`,
+    };
+    trimmed += 1;
+  }
+  if (trimmed) {
+    notice(`⚠ 单回合上下文接近模型上限，已截短 ${trimmed} 条较早的工具结果（保头尾，中段省略）；后续产出请精简，重要结论写进文件而不是依赖历史回看。`);
+  }
+  return out;
 }
 
 export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
   const { model, tools, ctx, events } = opts;
   const maxRounds = opts.maxRounds ?? MAX_TOOL_ROUNDS;
   const schemas = toolSchemas(tools);
+  const budgetTokens = opts.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
   let history = opts.history;
   /* 本轮是否还带着工具调用：轮次上限退出时用它区分「静默到顶」与自然终轮 */
   let lastHadTools = false;
 
   for (let round = 0; round <= maxRounds; round++) {
     if (opts.signal?.aborted) break;
+    history = trimHistoryForBudget(history, budgetTokens, (t) => events.onNotice?.(t));
     events.onAssistantStart();
     let acc = '';
     let accReasoning = '';
@@ -96,6 +144,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             ...(schemas.length ? { tools: schemas } : {}),
             ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
             ...(opts.signal ? { signal: opts.signal } : {}),
+            ...(opts.convId ? { convId: opts.convId } : {}),
           },
         );
         toolCalls = r.toolCalls;
@@ -151,7 +200,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
       };
       history = [...history, assistantMsg];
       for (const call of toolCalls) {
-        const result = await executeToolCall(tools, call, ctx);
+        /*
+         * 停止语义：正在执行的工具任其跑完（半途掐断写操作更糟），但同批
+         * 尚未开始的不再执行——补一条占位结果保持 tool_calls 与 tool 消息
+         * 配对（OpenAI 协议悬空的 tool_call 会让续轮请求被拒）。
+         */
+        const result = opts.signal?.aborted
+          ? '（用户已停止本回合，该工具未执行）'
+          : await executeToolCall(tools, call, ctx);
         history = [...history, { role: 'tool', content: result, toolCallId: call.id }];
         events.onToolResult(call, result);
       }

@@ -626,7 +626,17 @@ export function envInfoTool(): AgentTool {
           `python: ${env.python}`,
           `evalscope: ${env.evalscope ? env.evalscope.version : '未安装（评测链需自建 harness 或先安装）'}`,
           env.benchmarks
-            ? `evalscope 可用基准（${env.benchmarks.length} 个，--eval_dataset 只认这些精确名，版本/subset/limit 注记不要写进名字）：\n${env.benchmarks.join(' ')}`
+            ? (() => {
+                const entries = Object.entries(env.benchmarks);
+                const benchLines = entries.map(([name, subsets]) =>
+                  subsets.length ? `- ${name}：subset 可选 ${subsets.join(' | ')}` : `- ${name}（无 subset）`,
+                );
+                return [
+                  `evalscope 可用基准（${entries.length} 个，--eval_dataset 只认这些精确名；subset 用 --eval_dataset_args 透传）：`,
+                  ...benchLines,
+                  `subset 透传示例：--eval_dataset_args '{"live_code_bench":{"subset_list":["release_v6"]}}'`,
+                ].join('\n');
+              })()
             : 'evalscope 基准注册表暂不可达（需要 --eval_dataset 时先跑一条只读命令核对名字）',
           `模型缓存根: ${env.modelCache}`,
           env.cachedModels.length ? `已缓存模型: ${env.cachedModels.join('、')}` : '已缓存模型: （无）',

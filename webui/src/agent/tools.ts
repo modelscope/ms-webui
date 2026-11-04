@@ -69,9 +69,18 @@ export async function executeToolCall(
     ].join('\n');
   }
   const tool = tools.find((t) => t.schema.function.name === call.name);
-  /* 点名成因：工具集随胶囊开关变化，历史里用过不代表本轮挂了一模型看到回喂就知道引导用户开胶囊，而不是猜「工具 flaky」 */
+  /*
+   * 点名成因 + 列出本轮真实工具面：模型能立刻分辨「名字笔误/文档示例」与
+   * 「确实没挂载」。胶囊指引只对页面会话成立——服务端研究回合本就挂全套，
+   * 混着说会让模型引导用户去开一个不存在的开关。
+   */
   if (!tool)
-    return `未知工具: ${call.name}（本轮没有挂载它——文件/shell/脚本类工具需要输入框上方的「代码」胶囊开着；若已开着则确认这个工具名是否存在）`;
+    return [
+      `未知工具: ${call.name}（本轮没有挂载它）。`,
+      `本轮可用工具：${tools.map((t) => t.schema.function.name).join('、') || '（无）'}。`,
+      '名字不在上面就是笔误或来自文档示例，换用列表里的工具；若缺文件/shell/脚本类工具：页面会话需输入框上方「代码」胶囊开启后重发，服务端研究回合已挂全套工具、不存在此问题。',
+    ].join('\n');
+
   try {
     return await tool.execute(args, ctx);
   } catch (e) {

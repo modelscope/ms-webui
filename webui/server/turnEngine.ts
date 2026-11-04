@@ -23,7 +23,7 @@ import { join } from 'node:path';
 import type { AgentTool } from '../src/agent/tools';
 import type { ChatMessage, ToolCall } from '../src/api/models';
 import { runAgentLoop } from '../src/agent/runAgentLoop';
-import { compressHistory, setSummaryStorage, type SummaryStorage } from '../src/agent/history';
+import { compressHistory, estimateTokens, setSummaryStorage, type SummaryStorage } from '../src/agent/history';
 import {
   WORKBENCH_GUIDE,
   envInfoTool,
@@ -105,8 +105,11 @@ export interface TurnApproval {
 export interface TurnEngineHandle {
   /** 页面提交回合：任一列在跑即整批拒绝（页面按钮本就有流式守卫） */
   submitTurn(conv: string, req: TurnSubmit): { turnId: string } | { error: string };
-  /** 唤醒回合（研究/脚本事件的合成消息；组装沿用 headless 时代的块） */
-  runWakeupTurn(conv: string, model: string, text: string): void;
+  /**
+   * 唤醒回合（研究/脚本事件）：锁在同步段占用，prepare 在锁内取走事件并合成
+   * 消息。返回 false = 该列在跑、事件未被消费（调用方留待下一拍重试）。
+   */
+  runWakeupTurn(conv: string, model: string, prepare: () => Promise<string>): boolean;
   /** SSE 订阅：返回退订函数 */
   subscribe(conv: string, fn: (ev: TurnEvent) => void): () => void;
   /** 该列在跑（含审批挂起）即 true：提交拒绝与页面按钮态共用 */
@@ -134,6 +137,12 @@ export interface TurnEngineHandle {
 interface ApprovalsFile {
   /** 免审命令白名单（shell 命令名等；浏览器与引擎共用一份） */
   allowed: string[];
+  /**
+   * 会话级免审开关（conv id 列表）：页面勾「免审」随回合提交同步进来并持久
+   * 化——浏览器关闭后的唤醒回合同样免审，不会卡在无人可见的审批上；取消
+   * 勾选的下一回合自动移除。
+   */
+  bypassConvs: string[];
   pending: TurnApproval[];
 }
 
@@ -198,7 +207,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
   const aborters = new Map<string, AbortController>();
   /** SSE 订阅者：conv → 监听集合 */
   const listeners = new Map<string, Set<(ev: TurnEvent) => void>>();
-  let approvals: ApprovalsFile = { allowed: [], pending: [] };
+  let approvals: ApprovalsFile = { allowed: [], bypassConvs: [], pending: [] };
 
   const approvalsFile = () => join(deps.dataDir(), 'approvals.json');
   const saveApprovals = (): void => {
@@ -216,7 +225,11 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
   try {
     const a = JSON.parse(readFileSync(approvalsFile(), 'utf-8')) as ApprovalsFile;
     if (a && typeof a === 'object') {
-      approvals = { allowed: Array.isArray(a.allowed) ? a.allowed : [], pending: Array.isArray(a.pending) ? a.pending : [] };
+      approvals = {
+          allowed: Array.isArray(a.allowed) ? a.allowed : [],
+          bypassConvs: Array.isArray(a.bypassConvs) ? a.bypassConvs : [],
+          pending: Array.isArray(a.pending) ? a.pending : [],
+        };
     }
   } catch {
     /* 无文件 */
@@ -250,7 +263,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         resolve(true);
         return;
       }
-      approvals.pending = approvals.pending.filter((p) => p.conv !== conv);
+      approvals.pending = approvals.pending.filter((p) => !(p.conv === conv && p.model === model));
       const req: TurnApproval = {
         id: randomUUID(),
         conv,
@@ -304,10 +317,13 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       apiKey?: string;
       /** 页面免审总闸：该回合的一切审批直接放行 */
       bypassApproval?: boolean;
+      /** 调用方已在同步段占用的锁 id（唤醒回合的竞态修复）；不传则本函数自己占 */
+      ownedTurnId?: string;
     },
   ): Promise<void> => {
     const key = `${conv}\u0000${model}`;
-    running.set(key, randomUUID());
+    const turnId = opts.ownedTurnId ?? randomUUID();
+    running.set(key, turnId);
     if (opts.abortable) aborters.set(key, opts.abortable);
     try {
       broadcast({ type: 'turn-start', conv, model });
@@ -319,7 +335,14 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         return;
       }
       const dialogue = [...bucket, opts.userMsg];
-      const compressed = await compressHistory({ convId: conv, modelId: model, dialogue });
+      const compressed = await compressHistory({
+        convId: conv,
+        modelId: model,
+        dialogue,
+        ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
+        /* 固定 system（指引/skills 文档）与对话共享上下文预算：阈值要扣掉它 */
+        reservedTokens: estimateTokens(opts.system),
+      });
       if (!isCurrent()) return;
       const history: ChatMessage[] = [...opts.system, ...compressed];
       appendTurn(conv, model, opts.userMsg);
@@ -348,7 +371,10 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         model,
         history,
         tools: opts.tools,
-        ctx: { requestApproval: requestApproval(conv, model, opts.bypassApproval === true), allowedCommands: new Set(approvals.allowed) },
+        ctx: {
+          requestApproval: requestApproval(conv, model, opts.bypassApproval === true || approvals.bypassConvs.includes(conv)),
+          allowedCommands: new Set(approvals.allowed),
+        },
         sampling: opts.sampling ?? deps.chatDefaults(),
         ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
         ...(opts.abortable ? { signal: opts.abortable.signal } : {}),
@@ -393,7 +419,8 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       console.log(`[turn] 回合失败 ${opts.label}: ${String(e)}`);
       broadcast({ type: 'turn-done', conv, model, error: String(e) });
     } finally {
-      running.delete(key);
+      /* 按所有权释放：占锁与释放之间可能换代或被顶替，只清自己持有的锁 */
+      if (running.get(key) === turnId) running.delete(key);
       aborters.delete(key);
     }
   };
@@ -405,6 +432,15 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       }
       const turnId = randomUUID();
       if (req.title) deps.upsertChat(conv, req.title);
+      /* 会话级免审随回合同步并持久化：开着=本会话一切回合（含后台唤醒）免审 */
+      const bypassIdx = approvals.bypassConvs.indexOf(conv);
+      if (req.noApproval && bypassIdx < 0) {
+        approvals.bypassConvs.push(conv);
+        saveApprovals();
+      } else if (!req.noApproval && bypassIdx >= 0) {
+        approvals.bypassConvs.splice(bypassIdx, 1);
+        saveApprovals();
+      }
       for (const m of req.models) {
         const abortable = new AbortController();
         void runTurnCore(conv, m, {
@@ -420,14 +456,34 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       }
       return { turnId };
     },
-    runWakeupTurn(conv, model, text) {
-      if (running.has(`${conv}\u0000${model}`)) return;
+    runWakeupTurn(conv, model, prepare) {
       /*
-       * 唤醒回合的组装（与 headless 时代同一套 system 块）：研究指引 + 教训
-       * 文件 + 任务/行动指引 + 技能文档。工具集 = 研究会话的全套（workspace +
-       * research + home + 常驻查询件）。
+       * 锁在同步段占用：事件取走（prepare 内有 await）与 skills 组装都发生在
+       * 占锁之后——组装窗口里页面提交会被 running 拒绝，不会出现「检查时
+       * 空闲、执行时双写」。prepare 只在占锁成功后调用：返回 false 时事件
+       * 未被取走（调用方留待下一拍），唤醒事件零丢失。
        */
+      const key = `${conv}\u0000${model}`;
+      if (running.has(key)) return false;
+      const turnId = randomUUID();
+      running.set(key, turnId);
       void (async () => {
+        let text = '';
+        try {
+          text = (await prepare()).trim();
+        } catch (e) {
+          console.log(`[turn] 唤醒事件取走失败（${conv}/${model}）: ${String(e)}`);
+        }
+        if (!text) {
+          /* 事件被并发取走或取走失败：释放锁退出（事件源头自行兜底重放） */
+          if (running.get(key) === turnId) running.delete(key);
+          return;
+        }
+        /*
+         * 唤醒回合的组装（与 headless 时代同一套 system 块）：研究指引 + 教训
+         * 文件 + 任务/行动指引 + 技能文档。工具集 = 研究会话的全套（workspace +
+         * research + home + 常驻查询件）。
+         */
         const experimentsHead = deps.readExperimentsHead();
         const lessonsSystem = experimentsHead
           ? `## 过往实验与踩坑记录（workspace/EXPERIMENTS.md 头部，最新在前；更早的条目用 read_file 读全文件）\n${experimentsHead}`
@@ -438,7 +494,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         } catch {
           /* 技能面不可达：不注入，工具仍可 read_skill */
         }
-        if (!isCurrent()) return;
+        if (!isCurrent()) return; /* 换代：锁随旧实例闭包一起废弃，新实例 Map 独立 */
         await runTurnCore(conv, model, {
           userMsg: { role: 'user', content: text },
           system: [
@@ -450,8 +506,10 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
           ],
           tools: buildTools(['read_skill', 'list_catalog', 'env_info', 'read_swift_source', 'workspace', 'research', 'home'], conv, model, text),
           label: 'wakeup',
+          ownedTurnId: turnId,
         });
       })();
+      return true;
     },
     subscribe(conv, fn) {
       const set = listeners.get(conv) ?? new Set();
@@ -478,6 +536,10 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
     },
     abortTurn(conv, model) {
       aborters.get(`${conv}\u0000${model}`)?.abort();
+      /* 停止连带结算该列挂起的审批：pending 消失即引擎轮询按拒绝收尾，未开始的工具不再执行 */
+      const before = approvals.pending.length;
+      approvals.pending = approvals.pending.filter((p) => !(p.conv === conv && p.model === model));
+      if (approvals.pending.length !== before) saveApprovals();
     },
     retire(conv) {
       retired.add(conv);

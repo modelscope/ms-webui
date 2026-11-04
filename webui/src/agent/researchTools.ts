@@ -77,13 +77,13 @@ export function researchTools(conv: string, model: string): AgentTool[] {
             eval_dataset: {
               type: 'string',
               description:
-                '评测数据。evalscope 通道必须填注册表精确名（全名单用 env_info 工具查「可用基准」一节，' +
-                '小写下划线形，如 live_code_bench / humaneval / mbpp / gsm8k）——版本、subset、limit 等注记' +
-                '不要写进名字（括号注记会被注册表拒绝，limit 走单独参数）；内置 live_code_bench 是固化' +
-                'lite 版，要精确 release 版本就填自建标识并选 custom 判分通道。自定义 held-out 数据集' +
-                '同理走 custom 通道。',
-            },
-            metric_name: {
+                '评测数据。evalscope 通道必须填注册表精确名（全名单与各基准的 subset 值域用 env_info 工具查' +
+                '「可用基准」一节，小写下划线形，如 live_code_bench / humaneval / mbpp / gsm8k）——limit 走单独' +
+                '参数；需要特定版本/subset 时写成「精确名 (subset)」注记（如 live_code_bench (release_v6)），' +
+                '平台会拆成注册名 + subset_list 经 --eval_dataset_args 透传，不会丢语义。自定义 held-out 数据集' +
+                '走 custom 判分通道。',
+              },
+metric_name: {
               type: 'string',
               description: '判分指标名：evalscope 报告里的 metric 名（如 mean_acc / acc）；自定义判分时填判分输出的指标名',
             },

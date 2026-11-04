@@ -16,6 +16,12 @@ import { streamChat, type ChatMessage } from '../api/models';
 
 /** 触发阈值：约 32k 上下文的 75%。Qwen/DeepSeek 词表与 cl100k 有偏差，保守取值 */
 const COMPRESS_THRESHOLD_TOKENS = 24000;
+/** 模型上下文假设（32k 级）：与固定 system 注入合计后的总预算约束 */
+const CONTEXT_TOKENS = 32768;
+/** 输出与编码偏差的预留量 */
+const CONTEXT_RESERVE_TOKENS = 4096;
+/** 压缩后至少保留的对话空间：system 注入再大也不能把对话挤没 */
+const MIN_DIALOGUE_TOKENS = 6000;
 /** 压缩后保留原文的最近消息条数（对话轮语义，实际切点会对齐到 user 边界） */
 const KEEP_RECENT_MSGS = 8;
 /** 一张图片的粗估 token（多模态编码 800 上下，只做触发判断用） */
@@ -174,9 +180,23 @@ export async function compressHistory(opts: {
   dialogue: ChatMessage[];
   /** 展览模式默认模型的会话 token（摘要请求与主对话同一条通道） */
   apiKey?: string;
+  /**
+   * 调用方固定 system 注入（人格/指引/skills 文档）的 token 占用：真实请求
+   * 预算 = system + 对话，阈值必须扣掉它——否则 skills 常驻十几 k 时对话再
+   * 压到 24k 也装不进上下文。不传用旧固定阈值（兼容无 system 的调用方）。
+   */
+  reservedTokens?: number;
 }): Promise<ChatMessage[]> {
   const { convId, modelId, dialogue } = opts;
-  if (estimateTokens(dialogue) <= COMPRESS_THRESHOLD_TOKENS) return dialogue;
+  /*
+   * 24000 常量保留为「无预留信息」的默认；有预留时阈值 = 上下文 - 预留 -
+   * 余量，且不低于对话最低保留——system 再大也留 6k 给对话本体。
+   */
+  const threshold =
+    opts.reservedTokens === undefined
+      ? COMPRESS_THRESHOLD_TOKENS
+      : Math.max(MIN_DIALOGUE_TOKENS, CONTEXT_TOKENS - CONTEXT_RESERVE_TOKENS - opts.reservedTokens);
+  if (estimateTokens(dialogue) <= threshold) return dialogue;
   const k = cutPoint(dialogue);
   if (k <= 0) return dialogue;
 
@@ -198,32 +218,44 @@ export async function compressHistory(opts: {
   ].join('\n\n');
 
   try {
-    let acc = '';
-    let accReasoning = '';
-    await streamChat(
-      modelId,
-      [
-        { role: 'system', content: SUMMARIZER_SYSTEM },
-        { role: 'user', content: transcript },
-      ],
-      (parts) => {
-        acc += parts.content;
-        accReasoning += parts.reasoning;
-      },
-      {
-        temperature: 0.3,
-        maxTokens: 2048,
-        ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
-      },
-    );
-    /* 非思考模型的整条输出会被拆分器误入思考桶，与主循环同一兜底 */
-    const summary = (acc || accReasoning).trim();
-    if (!summary) return dialogue;
-    saveSummary(convId, modelId, { summary, covered: k });
-    return [
-      { role: 'system', content: `此前对话的要点摘要：\n${summary}` },
-      ...dialogue.slice(k),
-    ];
+    /*
+     * 摘要被 max_tokens 截断时的处理：截断的非空摘要会以 covered=k 落盘，
+     * 丢失的段落永不补回——先翻倍重试一次；仍截断再用非空部分（部分摘要
+     * 仍优于全丢）；完全没产出才降级为不压缩。
+     */
+    let roundMaxTokens = 2048;
+    for (let attempt = 0; ; attempt += 1) {
+      let acc = '';
+      let accReasoning = '';
+      const r = await streamChat(
+        modelId,
+        [
+          { role: 'system', content: SUMMARIZER_SYSTEM },
+          { role: 'user', content: transcript },
+        ],
+        (parts) => {
+          acc += parts.content;
+          accReasoning += parts.reasoning;
+        },
+        {
+          temperature: 0.3,
+          maxTokens: roundMaxTokens,
+          ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
+        },
+      );
+      /* 非思考模型的整条输出会被拆分器误入思考桶，与主循环同一兜底 */
+      const summary = (acc || accReasoning).trim();
+      if (summary && r.finishReason === 'length' && attempt === 0 && roundMaxTokens < 8192) {
+        roundMaxTokens = 8192;
+        continue;
+      }
+      if (!summary) return dialogue;
+      saveSummary(convId, modelId, { summary, covered: k });
+      return [
+        { role: 'system', content: `此前对话的要点摘要：\n${summary}` },
+        ...dialogue.slice(k),
+      ];
+    }
   } catch {
     return dialogue;
   }
