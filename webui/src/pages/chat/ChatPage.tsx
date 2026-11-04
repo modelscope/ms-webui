@@ -895,7 +895,8 @@ export function ChatPage() {
   /*
    * URL 的 conv 参数是会话态的唯一开关：有值进对应会话；被清空（点侧栏「对话」
    * 导航、点「新对话」、再点当前会话的 toggle）即回首页。依赖只有 convParam，
-   * hero 态发送消息不触碰 URL，所以不会被误拉回首页。
+   * hero 首发建档即写入 conv 参数（见 send），effect 的 if 分支与发送侧的
+   * setActiveConv/setStarted 同值幂等，不会重置发送态。
    *
    * 进会话时顺带恢复该会话实际用过的模型：默认选中（清单第一条或官方默认
    * 模型）与会话存消息的桶未必是同一个——不恢复的话右侧是空列（消息都在
@@ -1214,6 +1215,14 @@ export function ChatPage() {
     /* 无会话（hero 首发 / 刚点「新对话」）时建档，标题取首句；续聊只刷新时间 */
     const conv = activeConv || `c${Date.now().toString(36)}`;
     if (!activeConv) setActiveConv(conv);
+    /*
+     * 发送侧维护「URL ↔ 当前会话」恒同步：URL 落后于 activeConv 就补写
+     * （replace，只补地址不进历史栈）。SSE 订阅与 convParam 恢复链都以
+     * URL 为开关，落后则回合无人观看——turn 在 server 照常跑完落盘，页面
+     * 却收不到任何增量（按钮态靠订阅后的 sync 事件恢复）。convParam effect
+     * 的 if 分支与这里的 setActiveConv/setStarted 同值幂等，不会重置发送态。
+     */
+    if (convParam !== conv) setSearchParams({ conv }, { replace: true });
     const title = text
       ? text.length > 16
         ? `${text.slice(0, 16)}…`
