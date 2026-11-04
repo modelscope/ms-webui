@@ -31,20 +31,21 @@ export const WEB_SEARCH_SYSTEM =
 
 /*
  * 「研究」模式的行为引导（代码级注入，不随用户设置里的旧预设文案漂移）：
- * 优先级——bundled skills 文档（SKILL.md 全文 + read_skill 深度文档）/
+ * 优先级——bundled skills（索引常驻 + read_skill 按需展开正文）/
  * web_search > 本地文件探查。数据集格式、CLI 参数、组件用法这类「文档里就有」
  * 的问题不该靠翻本地文件来回答，一次研究任务里十几条只读命令 + 审批点是把
  * 用户当批处理跑。
  */
 export const RESEARCH_GUIDANCE =
-  'Prioritize the bundled skill documents and web_search over local file inspection: dataset ' +
+  'Prioritize the bundled skills and web_search over local file inspection: dataset ' +
   'formats, CLI flags, component usage and model ids are documented there — do not read local ' +
-  'dataset files just to determine a format. The SKILL.md of each skill is already in your context; ' +
-  'when you need deeper details (full CLI reference, components, plugins, server-client), read the ' +
-  'listed companion files with the read_skill tool instead of hunting for them with read_file or ' +
-  'shell. Read local workspace files only when the answer genuinely depends on their contents ' +
-  '(data you created, logs, outputs). Keep tool usage minimal: prefer one decisive command over ' +
-  'exploratory ones, and reuse conclusions you already drew instead of re-checking the same file.';
+  'dataset files just to determine a format. Each skill is a one-line description in your context; ' +
+  'when the task matches one, read its SKILL.md with the read_skill tool (path like ' +
+  '"swift-usage/SKILL.md") before answering, and follow it to the listed companion files instead ' +
+  'of hunting with read_file or shell. Read local workspace files only when the answer genuinely ' +
+  'depends on their contents (data you created, logs, outputs). Keep tool usage minimal: prefer ' +
+  'one decisive command over exploratory ones, and reuse conclusions you already drew instead of ' +
+  're-checking the same file.';
 
 /** 检索结果回喂格式：带编号的标题/链接/摘要 */
 function formatSearchHits(hits: SearchHit[]): string {
@@ -490,9 +491,9 @@ export function workspaceTools(conv?: string, modelId?: string): AgentTool[] {
  */
 export const WORKBENCH_GUIDE = [
   '## 工作台行动指引',
-  '- swift 的用法以注入的 skills 文档为准：SKILL.md 全文在上下文里，CLI 全参数、组件、插件、server-client 等细节用 read_skill 读附属文档；不要用 swift --help 或翻安装源码来回答用法问题。',
+  '- swift 的用法以附带技能为准：上下文里是每份技能的一行用途索引，命中后用 read_skill 读主文档（如 swift-usage/SKILL.md）与附属文档（CLI 全参数、组件、插件、server-client）；不要用 swift --help 或翻安装源码来回答用法问题。',
   '- skills 文档查不到的细节、或怀疑文档与安装版本不符时，用 read_swift_source 读当前 python 环境安装的 swift 源码核实（相对包根路径，如 dev/config/train_config.py）——文档优先，源码是仲裁手段不是首选。',
-  '- 找数据集/模型候选用 list_catalog（swift 注册表全量，数据集带标签与热度、模型带 model_type；cached 标记已在本机）：先搜再问；ModelScope 平台与 Hub 操作参考 ms-hub 技能文档。',
+  '- 找数据集/模型候选用 list_catalog（swift 注册表全量，数据集带标签与热度、模型带 model_type；cached 标记已在本机）：先搜再问；ModelScope 平台与 Hub 操作先用 read_skill 读 ms-hub/SKILL.md 再动手。',
   '- 模型必须由用户指定（hub id 或本地路径）：缺了就把 list_catalog 的候选摆给用户挑，不要猜。',
   '- 算力规划用 env_info 查本地 GPU 清单与 swift 环境：本地训练的卡数决定 nproc_per_node（create_train 的 gpus 传卡号列表）；远端/集群资源只声明卡数（gpu_count），不传本机卡号。',
   '- 环境事实一次拿全：GPU/卡数、模型缓存根与已缓存模型、swift 与 evalscope 的版本可用性、python 解释器，全在 env_info 的返回里——不要为这些写 probe 脚本或连环 shell 探测（每条都要审批还烧轮次）；模板渲染、数据字段这类 swift 行为问题用 read_swift_source 仲裁。把精力放在数据集选择、模型选择、训练构型、实验设计、算法与指标设计上。',
@@ -505,10 +506,10 @@ export const WORKBENCH_GUIDE = [
 ].join('\n');
 
 /**
- * 技能深度文档工具：read_skill。system 上下文里只注入各技能的 SKILL.md 全文
- * 与附属文件清单——清单里的文件（CLI 全参数、组件、插件、server-client 等）
- * 物理上不在工作空间，read_file/shell 都够不着。没有这个工具时模型被引导
- * 「优先查文档」却查不到，就退化成乱翻工作空间。
+ * 技能文档工具：read_skill。上下文里只有各技能的一行用途索引——主文档
+ * （SKILL.md）与附属文件（CLI 全参数、组件、插件、server-client 等）都经
+ * 它按需展开。文档物理上不在工作空间，read_file/shell 都够不着；没有这个
+ * 工具时模型被引导「优先查文档」却查不到，就退化成乱翻工作空间。
  */
 export function readSkillDocTool(): AgentTool {
   return defineTool(
@@ -517,16 +518,18 @@ export function readSkillDocTool(): AgentTool {
       function: {
         name: 'read_skill',
         description:
-          '读取一份附带技能文档的附属深度文档（如 swift-usage/cli-reference.md）。' +
-          'SKILL.md 全文已在 system 上下文里；需要 CLI 完整参数、组件、插件、' +
-          'server-client、ModelScope 平台操作等细节时用它按需展开',
+          '展开一份附带技能的文档：主文档（如 "swift-usage/SKILL.md"）或附属深度文档（如 "swift-usage/cli-reference.md"）。' +
+          '上下文里只有每份技能的一行用途说明——任务命中其用途时先读主文档，再按其中指引读附属文档。' +
+          '长文档带 offset/limit 分段读（默认前 200 行），回执头部有行范围与续读提示',
         parameters: {
           type: 'object',
           properties: {
             path: {
               type: 'string',
-              description: '附属文档路径，形如 "swift-usage/cli-reference.md"（即上下文附属文件清单里列出的名字）',
+              description: '文档路径，形如 "swift-usage/SKILL.md"（主文档）或 "swift-usage/cli-reference.md"（附属）——用上下文技能索引里列出的名字',
             },
+            offset: { type: 'integer', description: '起始行号（1-based，与 limit 配合读片段）' },
+            limit: { type: 'integer', description: '读取行数（默认前 200 行，上限 2000）' },
           },
           required: ['path'],
         },
@@ -536,10 +539,24 @@ export function readSkillDocTool(): AgentTool {
       const path = String(args.path ?? '').replace(/^\/+/, '');
       const slash = path.indexOf('/');
       if (slash <= 0) {
-        return '路径形如 "<技能名>/<文件名>"，如 swift-usage/cli-reference.md——用上下文附属文件清单里列出的名字。';
+        return '路径形如 "<技能名>/<文件名>"：主文档如 "swift-usage/SKILL.md"，附属文档如 "swift-usage/cli-reference.md"——用上下文技能索引里列出的名字。';
       }
+      const offset = Number.isInteger(args.offset) && Number(args.offset) > 0 ? Number(args.offset) : undefined;
+      const limit = Number.isInteger(args.limit) && Number(args.limit) > 0 ? Number(args.limit) : undefined;
       try {
-        return await readSkillDoc(path.slice(0, slash), path.slice(slash + 1));
+        const r = await readSkillDoc(path.slice(0, slash), path.slice(slash + 1), {
+          ...(offset ? { offset } : {}),
+          ...(limit ? { limit } : {}),
+        });
+        /*
+         * 行范围元信息头 + 截断守卫，与 read_swift_source 同构：主文档可达
+         * 几万字符，无范围整读一次就占掉小半上下文预算且逐轮重发。
+         */
+        const end = r.offset + r.lines - 1;
+        const rangeNote = r.reachedEnd
+          ? `（第 ${r.offset}–${end} 行，已到文件尾）`
+          : `（第 ${r.offset}–${end} 行，其后还有内容——续读传 offset=${end + 1}）`;
+        return clipFeedback(`${rangeNote}\n${r.content}`, '技能文档 ');
       } catch (e) {
         return String(e instanceof Error ? e.message : e);
       }

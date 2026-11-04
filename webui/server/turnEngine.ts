@@ -481,7 +481,8 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         }
         /*
          * 唤醒回合的组装（与 headless 时代同一套 system 块）：研究指引 + 教训
-         * 文件 + 任务/行动指引 + 技能文档。工具集 = 研究会话的全套（workspace +
+         * 文件 + 任务/行动指引 + 技能索引（一行用途 + read_skill 按需展开正文）。
+         * 工具集 = 研究会话的全套（workspace +
          * research + home + 常驻查询件）。
          */
         const experimentsHead = deps.readExperimentsHead();

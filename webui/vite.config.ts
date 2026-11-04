@@ -3331,10 +3331,14 @@ function startDeployTask(body: {
   return { id, model, engine, servedName, adapters };
 }
 
-/** 一份可注入的技能：SKILL.md 全文 + 同目录其余 markdown 的相对路径清单 */
+/**
+ * 一份可注入的技能：frontmatter 的 description（索引式注入的唯一常驻内容）+
+ * SKILL.md 全文 + 同目录其余 markdown 的相对路径清单。
+ */
 interface SkillEntry {
   group: 'swift' | 'modelscope';
   name: string;
+  description: string;
   content: string;
   files: string[];
 }
@@ -3344,6 +3348,44 @@ interface SkillEntry {
  * 开发时编辑即时生效），否则读 fetch-skills 拷进 public/ 的副本（发布产物形态）；
  * modelscope 组只读 public/ 副本（`npm run fetch:skills` 拷入，未跑则空）。
  */
+/**
+ * SKILL.md frontmatter 的 description（单行值或 >- 折叠块）：索引式注入里
+ * 每份技能唯一常驻上下文的内容，缺失时由前端兜底取正文摘要。
+ */
+function parseSkillDescription(content: string): string {
+  const m = content.match(/^---\n([\s\S]*?)\n---\n/);
+  if (!m) return '';
+  const fm = m[1];
+  const dm = fm.match(/^description:\s*(.*)$/m);
+  if (!dm) return '';
+  const inline = dm[1].trim();
+  if (
+    inline &&
+    inline !== '>-' &&
+    inline !== '>' &&
+    inline !== '|-' &&
+    inline !== '|' &&
+    !inline.startsWith('>-') &&
+    !inline.startsWith('|-')
+  ) {
+    return (inline.startsWith('"') && inline.endsWith('"')) || (inline.startsWith("'") && inline.endsWith("'"))
+      ? inline.slice(1, -1)
+      : inline;
+  }
+  /* 折叠块：description: 之后的更深缩进行拼接，直到空行或回到顶格 */
+  const after = fm.slice(fm.indexOf(dm[0]) + dm[0].length).split('\n');
+  const folded: string[] = [];
+  for (const l of after) {
+    if (!l.trim()) {
+      if (folded.length) break;
+      continue;
+    }
+    if (!/^\s+\S/.test(l)) break;
+    folded.push(l.trim());
+  }
+  return folded.join(' ');
+}
+
 function scanSkills(root: string, group: SkillEntry['group']): SkillEntry[] {
   if (!existsSync(root)) return [];
   const entries: SkillEntry[] = [];
@@ -3361,7 +3403,13 @@ function scanSkills(root: string, group: SkillEntry['group']): SkillEntry[] {
       }
     };
     walk(dir);
-    entries.push({ group, name: d.name, content: readFileSync(skillMd, 'utf-8'), files: files.sort() });
+    entries.push({
+      group,
+      name: d.name,
+      description: parseSkillDescription(readFileSync(skillMd, 'utf-8')),
+      content: readFileSync(skillMd, 'utf-8'),
+      files: files.sort(),
+    });
   }
   return entries;
 }
@@ -3393,11 +3441,17 @@ function swiftSkillsRoot(): string {
 }
 
 /**
- * 读一份技能的附属文档（agent 的 read_skill 工具后端）。按技能名在两组根里
- * 找（模型只看到技能名，不感知组）；路径钉死在技能目录内、只放行 .md——
- * 注入清单里的相对路径是唯一合法输入形态。
+ * 读一份技能的文档（agent 的 read_skill 工具后端）：SKILL.md 主文档或附属
+ * .md。按技能名在两组根里找（模型只看到技能名，不感知组）；路径钉死在技能
+ * 目录内、只放行 .md。offset/limit 是行窗口（与 fs read 同语义）：默认前
+ * 200 行、上限 2000——主文档可达几万字符，整读会一次灌穿上下文。
  */
-function readSkillDocFile(skill: string, file: string): string | null {
+function readSkillDocFile(
+  skill: string,
+  file: string,
+  offset?: number,
+  limit?: number,
+): { content: string; offset: number; lines: number; reachedEnd: boolean } | null {
   if (!skill || !file || !file.endsWith('.md')) return null;
   const root = dirname(fileURLToPath(import.meta.url));
   const bases = [swiftSkillsRoot(), join(root, 'public', 'skills', 'modelscope')];
@@ -3407,7 +3461,16 @@ function readSkillDocFile(skill: string, file: string): string | null {
     const abs = resolve(dir, file);
     if (abs !== dir && !abs.startsWith(dir + sep)) return null;
     if (!isFile(abs)) continue;
-    return readFileSync(abs, 'utf-8');
+    const all = readFileSync(abs, 'utf-8').split('\n');
+    const start = offset !== undefined ? Math.min(offset, all.length) : 1;
+    const take = Math.min(limit !== undefined ? limit : 200, 2000);
+    const slice = all.slice(start - 1, start - 1 + take);
+    return {
+      content: slice.join('\n'),
+      offset: start,
+      lines: slice.length,
+      reachedEnd: start - 1 + take >= all.length,
+    };
   }
   return null;
 }
@@ -4288,18 +4351,22 @@ function swiftApiPlugin(): Plugin {
           const url = new URL(req.url ?? '/', 'http://local');
           const segs = url.pathname.split('/').filter(Boolean);
           if (req.method === 'GET' && segs[0] === 'doc') {
-            const content = readSkillDocFile(
+            const offset = Number(url.searchParams.get('offset'));
+            const limit = Number(url.searchParams.get('limit'));
+            const doc = readSkillDocFile(
               url.searchParams.get('skill') ?? '',
               url.searchParams.get('file') ?? '',
+              Number.isInteger(offset) && offset > 0 ? offset : undefined,
+              Number.isInteger(limit) && limit > 0 ? limit : undefined,
             );
-            if (content === null) {
+            if (doc === null) {
               res.statusCode = 404;
               res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({ error: '没有这份技能文档（只放行清单里列出的 .md 附属文件）' }));
+              res.end(JSON.stringify({ error: '没有这份技能文档（只放行技能目录内的 .md 文件）' }));
               return;
             }
             res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ content }));
+            res.end(JSON.stringify(doc));
             return;
           }
           res.setHeader('Content-Type', 'application/json');
