@@ -702,6 +702,8 @@ export const en: Partial<MessageTable> = {
   'rs.training': 'Training',
   'rs.evaluating': 'Evaluating',
   'rs.deciding': 'Deciding',
+  'rs.idleWakeShort': 'auto-wakes in {min} min',
+  'rs.idleWake': 'No in-flight task; auto-wakes in ~{min} min at the latest (stall sentinel fallback)',
   'rs.done': 'Goal met',
   'rs.escalated': 'Escalated',
   'rs.stopped': 'Stopped',

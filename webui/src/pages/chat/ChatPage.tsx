@@ -920,44 +920,61 @@ export function ChatPage() {
         if (best) setSingle(best);
       }
       /*
-       * headless 拉回（会话激活时）：浏览器关闭期间 server 可能直写过研究
-       * 轮次（convs.json 的桶比本地长）。比对后采用 server 版——否则一直开着
-       * 的旧标签页看不到 headless 轮次，还会在下次推送时用旧桶盖掉它们
-       * （服务端 PUT 守卫兜底，但这里先拉回就无竞态）。
+       * headless 拉回（会话激活时，visibility 恢复时同函数重做，见下方监听）。
        */
-      void (async () => {
-        try {
-          const res = await fetch('/api/convs');
-          if (!res.ok) return;
-          const srv = (await res.json()) as { turns?: Record<string, Record<string, ChatMessage[]>> };
-          const srvBuckets = srv.turns?.[convParam];
-          if (!srvBuckets) return;
-          setTurns((prev) => {
-            let changed = false;
-            const localBuckets = prev[convParam] ?? {};
-            const merged: Record<string, ChatMessage[]> = { ...localBuckets };
-            for (const [m, msgs] of Object.entries(srvBuckets)) {
-              if (!Array.isArray(msgs)) continue;
-              if (!merged[m] || msgs.length > merged[m].length) {
-                merged[m] = msgs;
-                changed = true;
-                /* 拉回的桶逐个写穿透（读-改-写全量，不动其他桶）并触发镜像推送 */
-                saveTurns(convParam, m, msgs);
-              }
-            }
-            if (!changed) return prev;
-            return { ...prev, [convParam]: merged };
-          });
-        } catch {
-          /* 服务端不可达：本地态照常 */
-        }
-      })();
+      void pullServerTurns();
     } else {
       setActiveConv('');
       setStarted(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [convParam]);
+
+  /*
+   * headless 拉回（会话激活与页面重新可见共用）：浏览器关闭/休眠期间 server
+   * 可能直写过研究轮次（convs.json 的桶比本地长）。比对后采用 server 版——
+   * 否则一直开着的旧标签页看不到 headless 轮次，还会在下次推送时用旧桶盖掉
+   * 它们（服务端 PUT 守卫兜底，但这里先拉回就无竞态）。切回标签页/电脑唤醒
+   * 后组件不会重新 mount，拉回必须跟着 visibility 重做——否则页面在旧基础
+   * 上续写新回合，与 headless 轮次分叉，守卫按长度二选一时必丢一边。
+   */
+  const pullServerTurns = async (): Promise<void> => {
+    if (!convParam) return;
+    try {
+      const res = await fetch('/api/convs');
+      if (!res.ok) return;
+      const srv = (await res.json()) as { turns?: Record<string, Record<string, ChatMessage[]>> };
+      const srvBuckets = srv.turns?.[convParam];
+      if (!srvBuckets) return;
+      setTurns((prev) => {
+        let changed = false;
+        const localBuckets = prev[convParam] ?? {};
+        const merged: Record<string, ChatMessage[]> = { ...localBuckets };
+        for (const [m, msgs] of Object.entries(srvBuckets)) {
+          if (!Array.isArray(msgs)) continue;
+          if (!merged[m] || msgs.length > merged[m].length) {
+            merged[m] = msgs;
+            changed = true;
+            /* 拉回的桶逐个写穿透（读-改-写全量，不动其他桶）并触发镜像推送 */
+            saveTurns(convParam, m, msgs);
+          }
+        }
+        if (!changed) return prev;
+        return { ...prev, [convParam]: merged };
+      });
+    } catch {
+      /* 服务端不可达：本地态照常 */
+    }
+  };
+  const pullServerTurnsRef = useRef(pullServerTurns);
+  pullServerTurnsRef.current = pullServerTurns;
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void pullServerTurnsRef.current();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -1001,6 +1018,18 @@ export function ChatPage() {
 
   const modelOptions = ids.map((m) => ({ value: m, label: m }));
   const columnTurns = (modelId: string): ChatMessage[] => turns[activeConv]?.[modelId] ?? [];
+
+  /*
+   * 研究静默期的下次自动唤醒（分钟）：stallSince 在场 = 无在飞且非终态（server
+   * 哨兵 2s 维护，有任务/回合在跑即清零），下次触发 = 无在飞满 30 分钟，且距
+   * 上次 stall 事件至少 1 小时（冷却）——两参数镜像自 vite.config.ts 的哨兵。
+   * 决策徽标带上它，用户才不用猜「后台还活着没有」。
+   */
+  const idleWakeMin = (() => {
+    if (!research || research.status !== 'deciding' || !research.stallSince) return null;
+    const next = Math.max(research.stallSince + 30 * 60_000, (research.lastStallAt ?? 0) + 60 * 60_000);
+    return Math.max(Math.ceil((next - Date.now()) / 60_000), 1);
+  })();
 
   /* 按钮点击：落预填（含会话续聊上下文）→ 跳转 → 消费掉这个意图 */
   const goCreatedLink = (conv: string, modelId: string, link: CreatedLink) => {
@@ -1793,6 +1822,12 @@ export function ChatPage() {
                       >
                         <FlaskConical size={12} />
                         {t(RESEARCH_STATUS_LABELS[research.status])}
+                        {idleWakeMin !== null && (
+                          <span className="text-muted-foreground font-normal">
+                            {' · '}
+                            {t('rs.idleWakeShort', { min: idleWakeMin })}
+                          </span>
+                        )}
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent>
@@ -1802,6 +1837,7 @@ export function ChatPage() {
                         max: research.budget.maxIterations,
                         action: researchPanelOpen ? t('chat.collapse') : t('chat.expand'),
                       })}
+                      {idleWakeMin !== null && <div>{t('rs.idleWake', { min: idleWakeMin })}</div>}
                     </TooltipContent>
                   </Tooltip>
                 )}

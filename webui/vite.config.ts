@@ -2076,7 +2076,11 @@ function convsFile(): string {
   return join(swiftHome(), 'convs.json');
 }
 
-function readConvs(): { chats: unknown[]; turns: Record<string, Record<string, unknown>> } {
+/**
+ * 读失败返回 null（区别于「空库」）：坏文件下当空库跑 appendTurn/PUT 会把
+ * 整库替换成单回合的桶——调用方必须显式处理 null（放弃回合 / 拒写 PUT）。
+ */
+function readConvs(): { chats: unknown[]; turns: Record<string, Record<string, unknown>> } | null {
   try {
     const raw = JSON.parse(readFileSync(convsFile(), 'utf-8'));
     return {
@@ -2084,7 +2088,7 @@ function readConvs(): { chats: unknown[]; turns: Record<string, Record<string, u
       turns: (raw as { turns?: Record<string, Record<string, unknown>> }).turns ?? {},
     };
   } catch {
-    return { chats: [], turns: {} };
+    return null;
   }
 }
 
@@ -3307,9 +3311,15 @@ function swiftApiPlugin(): Plugin {
         loadResearch,
         consumeResearchEvents: takeResearchEvents,
         consumeConvEvents: takeConvEvents,
-        readTurns: (conv, model) => (readConvs().turns[conv]?.[model] as ChatMessage[]) ?? [],
+        readTurns: (conv, model) => {
+          const c = readConvs();
+          if (c === null) return null;
+          return (c.turns[conv]?.[model] as ChatMessage[] | undefined) ?? [];
+        },
         appendTurn: (conv, model, msg) => {
           const c = readConvs();
+          /* 坏文件时抛错（回合失败、不落盘），禁止当空库把整库换成单回合桶 */
+          if (c === null) throw new Error('convs.json unreadable');
           const buckets = { ...(c.turns[conv] ?? {}) } as Record<string, unknown[]>;
           buckets[model] = [...(buckets[model] ?? []), msg as unknown];
           writeConvs(c.chats, { ...c.turns, [conv]: buckets });
@@ -5720,13 +5730,28 @@ if (req.method === 'POST' && !seg0) {
           }
           if (req.method === 'GET') {
             res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify(readConvs()));
+            /* 坏文件按空库应答：浏览器本地态照常，拉回面拿不到东西不会误覆盖 */
+            res.end(JSON.stringify(readConvs() ?? { chats: [], turns: {} }));
             return;
           }
           if (req.method === 'PUT') {
             const body = (await readJsonBody(req)) as { chats?: unknown; turns?: unknown };
-            const turns = headless?.guardConvsPut((body.turns ?? {}) as Record<string, Record<string, unknown>>) ?? body.turns ?? {};
-            writeConvs(Array.isArray(body.chats) ? body.chats : [], turns);
+            /*
+             * 坏文件拒写（500）：守卫在此文件上比对长短，读不到 server 现状时
+             * 放行会把整库换成浏览器推来的版本；拒写后浏览器下一次写会再试。
+             */
+            const current = readConvs();
+            if (current === null) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'convs.json unreadable' }));
+              return;
+            }
+            const putChats = Array.isArray(body.chats) ? body.chats : [];
+            const turns =
+              headless?.guardConvsPut((body.turns ?? {}) as Record<string, Record<string, unknown>>, current.turns, putChats) ??
+              (body.turns ?? {});
+            writeConvs(putChats, turns);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ ok: true }));
             return;

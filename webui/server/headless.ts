@@ -40,8 +40,11 @@ export interface HeadlessDeps {
   consumeResearchEvents(id: string): Promise<ResearchSession['events']>;
   /** 取走该对话的积压脚本事件 */
   consumeConvEvents(conv: string): { text: string; modelId?: string }[];
-  /** convs.json 的 turns 桶读（无桶时空数组） */
-  readTurns(conv: string, model: string): ChatMessage[];
+  /**
+   * convs.json 的 turns 桶读（无桶时空数组）。文件读坏返回 null：调用方必须
+   * 显式放弃/失败——把它当空库跑回合或落盘会把整库替换成单回合的桶。
+   */
+  readTurns(conv: string, model: string): ChatMessage[] | null;
   /** turns 桶追加一条并落盘（读-改-写全量） */
   appendTurn(conv: string, model: string, msg: ChatMessage): void;
   /** 模型可用性：models.json 里的自定义远端（baseUrl + apiKey 齐备才 headless） */
@@ -80,8 +83,18 @@ export interface HeadlessHandle {
   resolveApproval(id: string, approve: boolean, alwaysAllow?: boolean): boolean;
   /** 浏览器「总是允许」同步白名单（页面侧审批通过时调用） */
   addAllowedCommand(command: string): void;
-  /** convs PUT 合并守卫：headless 写过且浏览器推来的桶更短时保住 server 版 */
-  guardConvsPut(turns: Record<string, Record<string, unknown>>): Record<string, Record<string, unknown>>;
+  /**
+   * convs PUT 合并守卫：headless 写过且浏览器推来的桶更短时保住 server 版。
+   * srvTurns/putChats 由调用方读一次传入（PUT 侧对坏文件直接拒写，这里拿到的
+   * 一定是可读的 server 现状）；putChats 用于分辨「删除传播」与「浏览器侧桶
+   * 丢失」——会话还在而桶没了按丢失处理（保住 server 桶），会话一并删了才
+   * 跟随删除。
+   */
+  guardConvsPut(
+    turns: Record<string, Record<string, unknown>>,
+    srvTurns: Record<string, Record<string, unknown>>,
+    putChats: unknown[],
+  ): Record<string, Record<string, unknown>>;
 }
 
 interface ApprovalsFile {
@@ -92,6 +105,8 @@ interface ApprovalsFile {
 
 /** 离线判定：超过该时长没有泵心跳即接管（泵是 2s 一拍，10s 容忍网络抖动） */
 const OFFLINE_AFTER_MS = 10_000;
+/** 恢复在线后 PUT 守卫继续保护的宽限：拉回 server 桶（fetch + 合并）留的时间 */
+const ONLINE_GRACE_MS = 10_000;
 
 /*
  * 实例代数：vite 改配置热重启会在同进程内重跑 configureServer——新实例创建时
@@ -128,6 +143,13 @@ export function createHeadlessRunner(deps: HeadlessDeps): HeadlessHandle {
   } satisfies SummaryStorage);
 
   const heartbeats = new Map<string, number>();
+  /*
+   * 心跳恢复时刻（conv → 离线后重新上线的时间）：PUT 守卫的放行宽限用。
+   * 浏览器刚恢复在线的头 ONLINE_GRACE_MS 内仍在拉回 server 桶（fetch 在途），
+   * 此时放行 PUT 会让旧 localStorage 盖掉 headless 轮次；宽限期后页面已稳定，
+   * 浏览器才是主写入方。
+   */
+  const resumedAt = new Map<string, number>();
   /** headless 回合锁：conv → model（在跑即占用，含审批挂起） */
   const running = new Map<string, string>();
   /** headless 写过、浏览器尚未拉回的 turns 桶（conv\u0000model） */
@@ -246,7 +268,13 @@ export function createHeadlessRunner(deps: HeadlessDeps): HeadlessHandle {
         /* 技能面不可达：不注入，工具仍可 read_skill */
       }
       if (!isCurrent()) return;
-      const dialogue = [...deps.readTurns(conv, model), { role: 'user' as const, content: text }];
+      const bucket = deps.readTurns(conv, model);
+      if (bucket === null) {
+        /* convs.json 读坏：放弃本回合（事件已消费，靠下一次 stall 唤醒补） */
+        console.log(`[headless] ${conv} turns 读失败，放弃本回合`);
+        return;
+      }
+      const dialogue = [...bucket, { role: 'user' as const, content: text }];
       const compressed = await compressHistory({ convId: conv, modelId: model, dialogue });
       if (!isCurrent()) return;
       const history: ChatMessage[] = [
@@ -339,7 +367,10 @@ export function createHeadlessRunner(deps: HeadlessDeps): HeadlessHandle {
 
   return {
     touchHeartbeat(conv) {
-      heartbeats.set(conv, Date.now());
+      const now = Date.now();
+      /* 离线超过阈值后重新上线：记恢复时刻（PUT 守卫宽限计时起点） */
+      if (now - (heartbeats.get(conv) ?? 0) >= OFFLINE_AFTER_MS) resumedAt.set(conv, now);
+      heartbeats.set(conv, now);
     },
     headlessTick() {
       for (const session of deps.loadResearch()) {
@@ -378,21 +409,43 @@ export function createHeadlessRunner(deps: HeadlessDeps): HeadlessHandle {
         saveApprovals();
       }
     },
-    guardConvsPut(turns) {
+    guardConvsPut(turns, srvTurns, putChats) {
+      const chatAlive = (conv: string): boolean =>
+        putChats.some((c) => typeof c === 'object' && c !== null && (c as { id?: unknown }).id === conv);
       for (const key of dirty) {
         const sp = key.indexOf('\u0000');
         const conv = key.slice(0, sp);
         const model = key.slice(sp + 1);
-        const putBucket = turns[conv]?.[model];
-        if (putBucket === undefined) {
-          /* PUT 全量不带该桶 = 浏览器删除传播：跟随删除、脱离脏集 */
+        /*
+         * 浏览器稳定在线（心跳持续且已过恢复宽限）即浏览器是当前主写入方：
+         * 它在跑的回合基于自己的基础桶追加，桶长可能仍短于 headless 早前写
+         * 的 server 版（分叉），此时按长度保 server 会把在线页面的新回合静默
+         * 丢弃（页面关闭再重进的「回合消失」即此）。放行 PUT 并脱离脏集——
+         * dirty 保护的对象是「浏览器关闭期间」的 server 直写；刚恢复在线的
+         * 宽限期内仍走长度保护（拉回未完成，旧桶 PUT 会盖掉 headless 轮次）。
+         */
+        if (online(conv) && Date.now() - (resumedAt.get(conv) ?? 0) >= ONLINE_GRACE_MS) {
           dirty.delete(key);
           continue;
         }
-        const srvBucket = deps.readTurns(conv, model);
+        const srvBucket = (srvTurns[conv]?.[model] as unknown[] | undefined) ?? [];
+        const putBucket = turns[conv]?.[model];
+        if (putBucket === undefined) {
+          /*
+           * PUT 不带该桶：会话本身还在（putChats 含该 conv）说明是浏览器侧
+           * 桶丢失（localStorage 配额/清缓存）而非用户删除——保住 server 桶，
+           * 不脱离脏集；会话一并删了才是真正的删除传播。
+           */
+          if (chatAlive(conv)) {
+            turns[conv] = { ...(turns[conv] ?? {}), [model]: srvBucket };
+          } else {
+            dirty.delete(key);
+          }
+          continue;
+        }
         if (Array.isArray(putBucket) && srvBucket.length > putBucket.length) {
-          /* 浏览器推来的桶短于 server（headless 新轮次未被拉回）：保住 server 版 */
-          turns[conv] = { ...(turns[conv] ?? {}), [model]: srvBucket as unknown[] };
+          /* 浏览器推来的桶短于 server（headless 新轮次未被拉回）：保住 server  版 */
+          turns[conv] = { ...(turns[conv] ?? {}), [model]: srvBucket };
         } else if (Array.isArray(putBucket) && putBucket.length >= srvBucket.length) {
           /* 浏览器已含 headless 轮次：桶归还浏览器主存储，脱离脏集 */
           dirty.delete(key);

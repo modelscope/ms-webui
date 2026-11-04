@@ -81,6 +81,13 @@ export interface ResearchSession {
   events: Array<{ at: string; kind: string; text: string }>;
   /** 事件历史（只增不删）：研究页事件流的展示源 */
   eventLog: Array<{ at: string; kind: string; text: string }>;
+  /**
+   * 停摆哨兵记账（server 2s 维护）：stallSince 在场 = 无在飞任务且非终态
+   * （有训练/评测/脚本/headless 回合在跑即清零）；lastStallAt = 上次发 stall
+   * 唤醒的时刻（1 小时冷却）。对话徽标据此显示静默期的下次自动唤醒时间。
+   */
+  stallSince?: number;
+  lastStallAt?: number;
   createdAt: string;
 }
 

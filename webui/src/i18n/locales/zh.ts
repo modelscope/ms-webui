@@ -703,6 +703,8 @@ export const zh = {
   'rs.training': '训练中',
   'rs.evaluating': '评测中',
   'rs.deciding': '决策中',
+  'rs.idleWakeShort': '{min} 分钟后自动唤醒',
+  'rs.idleWake': '当前无在飞任务，最晚约 {min} 分钟后自动唤醒（停摆哨兵兜底）',
   'rs.done': '已达标',
   'rs.escalated': '已上报',
   'rs.stopped': '已停止',
