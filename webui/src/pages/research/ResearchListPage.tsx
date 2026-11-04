@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { TaskListPage } from '@/components/TaskListPage';
 import { MODULES } from '@/theme/modules';
 import type { TaskItem } from '@/mock/types';
-import { listResearch, stopResearch, type ResearchSummary } from '@/api/research';
+import { listResearch, stopResearch, deleteResearch, type ResearchSummary } from '@/api/research';
 import { useT } from '@/i18n';
 
 /**
@@ -13,11 +13,17 @@ import { useT } from '@/i18n';
 export function researchTaskItem(s: ResearchSummary): TaskItem {
   const active =
     s.status === 'preparing' || s.status === 'training' || s.status === 'evaluating' || s.status === 'deciding';
+  /*
+   * 待唤醒判定与 watchResearchStall 的停摆阈值同源（30 分钟）：非终态且
+   * 无任何在飞任务（stallSince 在场）超过 30 分钟 = 靠哨兵周期性叫醒的
+   * 静默期，与「真在跑」分开显示——停摆数日的会话不再伪装成运行中。
+   */
+  const stalled = active && !!s.stallSince && Date.now() - s.stallSince >= 30 * 60_000;
   return {
     id: s.id,
     type: 'research',
     label: s.goal,
-    status: active ? 'RUNNING' : 'DONE',
+    status: stalled ? 'IDLE' : active ? 'RUNNING' : 'DONE',
     createdAt: s.createdAt,
     runner: 'local',
     model: s.baseModel,
@@ -26,7 +32,7 @@ export function researchTaskItem(s: ResearchSummary): TaskItem {
 
 /**
  * 研究会话列表（autoresearch）。没有新建按钮——会话由对话里的 agent 经访谈
- * 收敛后 create_research 创建；页面的职责是可见（状态与迭代进度）与可停。
+ * 收敛后 create_research 创建；页面的职责是可见（状态与迭代进度）、可停、可删。
  */
 export function ResearchListPage() {
   const { t } = useT();
@@ -55,6 +61,8 @@ export function ResearchListPage() {
         onRefresh: refresh,
         onStop: stopResearch,
         stopDesc: t('rs.stopDesc'),
+        onDelete: deleteResearch,
+        deleteDesc: t('rs.deleteDesc'),
       }}
     />
   );

@@ -16,6 +16,7 @@ import {
   Rocket,
   Search,
   Square,
+  Trash2,
   Workflow,
   Zap,
 } from 'lucide-react';
@@ -74,11 +75,16 @@ export interface TaskListOptions {
   onRerun?: (id: string) => Promise<void>;
   /** 停止确认弹窗的说明文案；不传用默认的 SIGTERM 文案（模块间停止语义不同） */
   stopDesc?: string;
+  /** 删除回调（真删除档案与自有数据）；不传则不渲染删除按钮（含确认弹窗） */
+  onDelete?: (id: string) => Promise<void>;
+  /** 删除确认弹窗的说明文案；不传用默认的不可恢复文案 */
+  deleteDesc?: string;
 }
 
 const STATUS_FILTERS: Array<{ label: MessageKey; value: TaskStatus | 'ALL' }> = [
   { label: 'task.all', value: 'ALL' },
   { label: 'task.running', value: 'RUNNING' },
+  { label: 'task.idle', value: 'IDLE' },
   { label: 'task.done', value: 'DONE' },
   { label: 'task.failed', value: 'FAILED' },
   { label: 'task.stopped', value: 'STOPPED' },
@@ -148,6 +154,7 @@ export function TaskListPage({
   /* 行操作 map 的循环变量 t 是任务项：toast 插值在此预绑，避免遮蔽冲突 */
   const rerunToast = (label: string) => toast.success(tr('task.rerunToast', { label }));
   const stopToast = (label: string) => toast.success(tr('task.stopToast', { label }));
+  const deleteToast = (label: string) => toast.success(tr('task.deleteToast', { label }));
   const [keyword, setKeyword] = useState('');
   const [status, setStatus] = useState<TaskStatus | 'ALL'>('ALL');
   const [renaming, setRenaming] = useState<RenameTarget | null>(null);
@@ -392,7 +399,7 @@ export function TaskListPage({
                       }}
                     />
                   )}
-                  {t.status === 'RUNNING' && options.onStop && (
+                  {(t.status === 'RUNNING' || t.status === 'IDLE') && options.onStop && (
                     /* 停止是不可逆的，换成需要二次确认的弹窗；
                        antd 的 Popconfirm 在 shadcn 里对应 AlertDialog */
                     <AlertDialog>
@@ -425,6 +432,42 @@ export function TaskListPage({
                             }}
                           >
                             {tr('task.stop')}
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  )}
+                  {options.onDelete && (
+                    /* 删除同停止一样不可逆（档案与会话自有数据一起清），二次确认 */
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={tr('task.delete')}
+                          className="text-state-failed hover:text-state-failed"
+                        >
+                          <Trash2 />
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>{tr('task.deleteConfirm', { label: t.label })}</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            {options.deleteDesc ?? tr('task.deleteHint')}
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>{tr('common.cancel')}</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => {
+                              void options
+                                .onDelete!(t.id)
+                                .then(() => deleteToast(t.label))
+                                .catch((e) => toast.error(String(e)));
+                            }}
+                          >
+                            {tr('task.delete')}
                           </AlertDialogAction>
                         </AlertDialogFooter>
                       </AlertDialogContent>

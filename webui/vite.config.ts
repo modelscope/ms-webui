@@ -5867,6 +5867,33 @@ if (req.method === 'POST' && !seg0) {
             res.end(JSON.stringify({ session: updated }));
             return;
           }
+          /*
+           * 真删除（列表页删除按钮，purge=1）：档案条目 + 会话自有数据目录
+           * 一起清。只清默认归属（dataDir 解析落在 research/<id>/ 下）——
+           * 用户自指的目录（如 data/v3）可能是别的实验在用的共享数据，不动。
+           * 训练/评测任务是独立生命周期，照常在各自页面跑，不受删除影响。
+           */
+          if (req.method === 'DELETE' && seg0 && url.searchParams.get('purge') === '1') {
+            const sessions = loadResearch();
+            const idx = sessions.findIndex((x) => x.id === seg0);
+            if (idx < 0) {
+              res.statusCode = 404;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'unknown research session' }));
+              return;
+            }
+            const [removed] = sessions.splice(idx, 1);
+            saveResearch(sessions);
+            const owned = join(workspaceRoot(), 'research', seg0);
+            const dataAbs = resolve(workspaceRoot(), removed.dataDir);
+            if (dataAbs === owned || dataAbs.startsWith(owned + sep)) {
+              /* dataDir 在会话自有根内：整棵 research/<id>/ 都是该会话的，连根清 */
+              rmSync(owned, { recursive: true, force: true });
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
           if (req.method === 'DELETE' && seg0) {
             await mutateResearch(seg0, (s) => {
               if (['preparing', 'training', 'evaluating', 'deciding'].includes(s.status)) {

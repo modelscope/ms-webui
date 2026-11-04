@@ -4,8 +4,11 @@
  * 后面接后端时这些类型可以直接复用，页面不用动。
  */
 
-/** 任务状态。由后端从 exit_code + 查活推导，前端只负责显示，不自己算 */
-export type TaskStatus = 'RUNNING' | 'DONE' | 'FAILED' | 'STOPPED';
+/**
+ * 任务状态。由后端从 exit_code + 查活推导，前端只负责显示，不自己算；
+ * IDLE 例外——研究会话的「停摆待唤醒」由研究列表适配层从 stallSince 推导。
+ */
+export type TaskStatus = 'RUNNING' | 'IDLE' | 'DONE' | 'FAILED' | 'STOPPED';
 
 /*
  * 后端小写状态 → 前端 TaskStatus 的唯一映射：五模块任务执行器共用这一组

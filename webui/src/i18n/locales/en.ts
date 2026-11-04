@@ -188,6 +188,10 @@ export const en: Partial<MessageTable> = {
   'task.sigtermHint': 'Graceful SIGTERM shutdown of the service and child processes',
   'task.loopLocal': 'Training loop runs locally, ops sink to {url}',
   'task.stopToast': 'Stopped: {label}',
+  'task.idle': 'Idle',
+  'task.deleteConfirm': 'Delete "{label}"?',
+  'task.deleteHint': 'Removes the archive entry immediately and irreversibly; in-flight training/eval tasks are unaffected (handle them on their pages).',
+  'task.deleteToast': 'Deleted: {label}',
   'task.more': 'More',
   'task.rename': 'Rename',
   'task.delete': 'Delete',
@@ -216,6 +220,8 @@ export const en: Partial<MessageTable> = {
   'status.failedHint': 'exit_code ≠ 0, or the process died without exit_code (e.g. OOM kill)',
   'status.stopped': 'Stopped',
   'status.stoppedHint': 'Stopped by SIGTERM or user; produced checkpoints and reports are untouched',
+  'status.idle': 'Idle',
+  'status.idleHint': 'No in-flight task for 30+ minutes; waiting on the stall sentinel. Freshly idle sessions still show as running for the first 30 minutes',
 
   /* ---------- AI assistant panel ---------- */
   'assistant.toolResult': '[tool result]',
@@ -713,6 +719,7 @@ export const en: Partial<MessageTable> = {
   'evm.parallel': 'Evaluate in parallel when GPUs are free',
   'rs.sourceModel': 'Base model',
   'rs.stopDesc': 'Only detaches the watcher and event wakeup; training/evaluation processes keep running (stop them on their task pages).',
+  'rs.deleteDesc': 'Removes the archive entry and the session-owned data directory (research/<id>/) for good; training/eval tasks keep running on their pages.',
   'rs.stopTooltip': 'Only detaches the watcher and event wakeup; training/evaluation processes keep running (stop them on their task pages)',
   'rs.iterationsTab': 'Iterations',
   'rs.eventsTab': 'Events',

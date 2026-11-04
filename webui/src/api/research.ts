@@ -169,3 +169,9 @@ export async function stopResearch(id: string): Promise<void> {
   const res = await fetch(`${apiBase()}/api/research/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.stopFailed', { status: res.status }));
 }
+
+/** 删除研究会话（真删除）：档案条目与会话自有数据目录（research/<id>/）一起清 */
+export async function deleteResearch(id: string): Promise<void> {
+  const res = await fetch(`${apiBase()}/api/research/${encodeURIComponent(id)}?purge=1`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(tStatic('api.deleteFailed', { status: res.status }));
+}

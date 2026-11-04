@@ -3,7 +3,8 @@ import type { TaskStatus } from '@/mock/types';
 import { useT, type MessageKey } from '@/i18n';
 
 /**
- * 状态标签。状态集合与任务执行器一致：RUNNING / DONE / FAILED / STOPPED。
+ * 状态标签。RUNNING / IDLE / DONE / FAILED / STOPPED——IDLE 仅研究会话
+ * 映射（停摆待唤醒），执行器任务不产生这一档。
  *
  * 原来是无边框的软胶囊（圆角 999 + 浅底色），现在是细边框 + 极淡底色的标记。
  * 圆角走 rounded-sm 而不是不写：以前靠「不写圆角类」就能得到直角，那是因为当时
@@ -23,6 +24,11 @@ const STATUS_META: Record<TaskStatus, { text: MessageKey; token: string; live?: 
       token: '--state-running',
       live: true,
       hint: 'status.runningHint',
+    },
+    IDLE: {
+      text: 'status.idle',
+      token: '--state-idle',
+      hint: 'status.idleHint',
     },
     DONE: {
       text: 'status.done',

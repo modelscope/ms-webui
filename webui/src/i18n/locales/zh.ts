@@ -187,6 +187,10 @@ export const zh = {
   'task.sigtermHint': 'SIGTERM 优雅关停服务与子进程',
   'task.loopLocal': '训练循环在本地，算子下沉到 {url}',
   'task.stopToast': '已停止：{label}',
+  'task.idle': '待唤醒',
+  'task.deleteConfirm': '删除「{label}」？',
+  'task.deleteHint': '立即从档案移除，不可恢复；在跑的训练/评测任务不受影响，可在各自页面处理。',
+  'task.deleteToast': '已删除：{label}',
   'task.more': '更多',
   'task.rename': '重命名',
   'task.delete': '删除',
@@ -215,6 +219,8 @@ export const zh = {
   'status.failedHint': 'exit_code ≠ 0，或进程已死但没留下 exit_code（如被 OOM kill）',
   'status.stopped': '已停止',
   'status.stoppedHint': 'SIGTERM 优雅关停或用户停止；已产出的 checkpoint 与报告不受影响',
+  'status.idle': '待唤醒',
+  'status.idleHint': '30 分钟无在飞任务，处于停摆哨兵的周期唤醒静默期；刚空闲的前 30 分钟仍显示运行中',
 
   /* ---------- AI 助手面板 ---------- */
   'assistant.toolResult': '[工具结果]',
@@ -714,6 +720,7 @@ export const zh = {
   'evm.parallel': '有空卡时并行评测',
   'rs.sourceModel': '底座模型',
   'rs.stopDesc': '只断 watcher 关联与事件唤醒；训练/评测进程照常跑（要停它们去对应任务页）。',
+  'rs.deleteDesc': '彻底移除档案条目与会话自有数据目录（research/<id>/）；训练/评测任务照常在各自页面跑。',
   'rs.stopTooltip': '只断 watcher 关联与事件唤醒；训练/评测进程照常跑（要停它们去对应任务页）',
   'rs.iterationsTab': '迭代账本',
   'rs.eventsTab': '事件流',
