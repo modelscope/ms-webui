@@ -908,20 +908,9 @@ export function ChatPage() {
     if (convParam) {
       setActiveConv(convParam);
       setStarted(true);
-      const buckets = turns[convParam];
-      if (buckets && !(buckets[single] ?? []).length) {
-        let best = '';
-        let bestLen = 0;
-        for (const [m, msgs] of Object.entries(buckets)) {
-          if (msgs.length > bestLen) {
-            best = m;
-            bestLen = msgs.length;
-          }
-        }
-        if (best) setSingle(best);
-      }
+      restoreBucketModel(convParam, turns[convParam] ?? {});
       /*
-       * headless 拉回（会话激活时，visibility 恢复时同函数重做，见下方监听）。
+       * server 桶拉回（会话激活时，visibility 恢复时同函数重做，见下方监听）。
        */
       void pullServerTurns();
     } else {
@@ -930,6 +919,26 @@ export function ChatPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [convParam]);
+
+  /*
+   * 恢复会话主力列：当前选中桶有消息就不动（用户手切过、切模型搬过桶的都
+   * 不拨回）；否则切到消息最多的桶（对比会话的主力列，单模型会话就是唯一
+   * 桶）。刷新时 convParam effect 跑在拉回之前（turns 还是空），恢复动作由
+   * pullServerTurns 拉到 server 桶后补跑——否则 single 停在默认模型上，
+   * 消息都在另一个模型的桶里，右侧是空列（看着像「历史丢了」）。
+   */
+  const restoreBucketModel = (conv: string, buckets: Record<string, ChatMessage[]>) => {
+    if ((buckets[single] ?? []).length) return;
+    let best = '';
+    let bestLen = 0;
+    for (const [m, msgs] of Object.entries(buckets)) {
+      if (msgs.length > bestLen) {
+        best = m;
+        bestLen = msgs.length;
+      }
+    }
+    if (best) setSingle(best);
+  };
 
   /*
    * 桶拉回（会话激活与页面重新可见共用）：server 是唯一真相源，本地短于
@@ -941,6 +950,8 @@ export function ChatPage() {
     if (!convParam) return;
     const buckets = await fetchConvBuckets(convParam);
     if (!Object.keys(buckets).length) return;
+    /* 拉到 server 桶即补跑主力列恢复（刷新时 convParam effect 早于拉回） */
+    restoreBucketModel(convParam, buckets);
     setTurns((prev) => {
       const cur = prev[convParam] ?? {};
       let changed = false;
@@ -1617,7 +1628,7 @@ export function ChatPage() {
   };
 
   /* 删除一段对话（确认弹窗在列表组件里）：注册表、「最近」、消息本体（含摘要）三处同步清理；
-     删的是当前会话则回首页 */
+     删的是当前会话则切到最近的另一段会话（留在对话页） */
   const removeChat = (id: string) => {
     deleteChat(id);
     removeRecent(`chat:${id}`);
@@ -1628,7 +1639,12 @@ export function ChatPage() {
       delete next[id];
       return next;
     });
-    if (id === activeConv) goHome();
+    if (id === activeConv) {
+      /* 删的是当前会话：切到列表里最近的另一段会话（留在对话页），没有别的才回新对话态 */
+      const rest = chats.filter((c) => c.id !== id);
+      if (rest.length) setSearchParams({ conv: rest[0].id });
+      else goHome();
+    }
   };
 
   // 未开始：整屏居中的大对话框；输入框上方靠右给一个历史对话入口
