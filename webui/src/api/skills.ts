@@ -26,8 +26,9 @@ export async function listSkills(): Promise<SkillEntry[]> {
 
 /** 读一份技能的附属文档（agent 的 read_skill 工具用；skill 名 + 清单里的相对路径） */
 export async function readSkillDoc(skill: string, file: string): Promise<string> {
+  /* agent 的 read_skill 工具在引擎（node）侧同用：必须过 apiBase 拼绝对地址 */
   const res = await fetch(
-    `/api/skills/doc?skill=${encodeURIComponent(skill)}&file=${encodeURIComponent(file)}`,
+    `${apiBase()}/api/skills/doc?skill=${encodeURIComponent(skill)}&file=${encodeURIComponent(file)}`,
   );
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? tStatic('api.skillDocFailed', { status: res.status }));
   return ((await res.json()) as { content: string }).content;

@@ -10,6 +10,7 @@ import { startDeploy } from '../api/deploy';
 import { startExport } from '../api/export';
 import { pruneCheckpoints, startTrain } from '../api/train';
 import { defineTool, type AgentTool } from './tools';
+import { apiBase } from '../api/base';
 
 /*
  * 训练执行器的属地 flag（output_dir/model/dataset/tuner 等）：webui 启动任务时
@@ -285,8 +286,9 @@ export function researchTools(conv: string, model: string): AgentTool[] {
     },
     async (args) => {
       try {
+        /* 引擎（node）侧同用此工具：相对路径在 node fetch 不可解析，必须过 apiBase */
         const res = await fetch(
-          `/api/train/${encodeURIComponent(str(args.train_task_id))}/checkpoints`,
+          `${apiBase()}/api/train/${encodeURIComponent(str(args.train_task_id))}/checkpoints`,
         );
         if (!res.ok) return `读取失败: ${(await res.json().catch(() => ({}))).error ?? res.status}`;
         const { checkpoints, resumeFrom, remote, warning } = (await res.json()) as {
