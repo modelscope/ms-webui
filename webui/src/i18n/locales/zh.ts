@@ -277,6 +277,7 @@ export const zh = {
   'approval.deny': '拒绝',
   'approval.allow': '允许执行',
   'approval.alwaysAllow': '本次会话内总是允许「{command}」命令',
+  'approval.headlessBadge': '后台自动研究中挂起的审批（浏览器关闭期间发起，处理后恢复自动迭代）',
 
 
   /* ---------- RL 双组配卡 ---------- */

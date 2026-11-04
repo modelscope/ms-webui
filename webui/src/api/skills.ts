@@ -6,7 +6,8 @@
  * system 上下文，附属文件只报路径清单。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 一份技能。content 是 SKILL.md 全文；files 是同目录其余 markdown 的相对路径 */
 export interface SkillEntry {
@@ -17,7 +18,7 @@ export interface SkillEntry {
 }
 
 export async function listSkills(): Promise<SkillEntry[]> {
-  const res = await fetch('/api/skills');
+  const res = await fetch(apiBase() + '/api/skills');
   if (!res.ok) throw new Error(tStatic('api.skillListFailed', { status: res.status }));
   const body = (await res.json()) as { skills: SkillEntry[] };
   return body.skills ?? [];

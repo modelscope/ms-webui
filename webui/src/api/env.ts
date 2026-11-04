@@ -4,7 +4,8 @@
  * 一次拿全环境事实，免得模型拿 shell 命令一条条试探。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 export interface EnvInfo {
   gpus: { index: number; name: string; used: number; total: number }[];
@@ -19,7 +20,7 @@ export interface EnvInfo {
 }
 
 export async function envInfo(): Promise<EnvInfo> {
-  const res = await fetch('/api/env');
+  const res = await fetch(apiBase() + '/api/env');
   if (!res.ok) throw new Error(tStatic('api.readEnvFailed', { status: res.status }));
   return (await res.json()) as EnvInfo;
 }

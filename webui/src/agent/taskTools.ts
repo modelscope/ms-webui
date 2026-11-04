@@ -1,10 +1,10 @@
 import { defineTool, type AgentTool, type ToolContext } from './tools';
-import type { PrefillModule, PrefillPayload } from '@/store/prefill';
-import { getTrainLog, listTrains, renameTrain, startTrain, stopTrain, trainTaskLabel } from '@/api/train';
-import { getEvalLog, listEvals, renameEval, stopEval, type EvalTaskInfo } from '@/api/eval';
-import { getExportLog, listExports, renameExport, stopExport } from '@/api/export';
-import { listDeploys, getDeployLog, renameDeploy, stopDeploy } from '@/api/deploy';
-import { listScripts, renameScript, stopScript } from '@/api/scripts';
+import type { PrefillModule, PrefillPayload } from '../store/prefill';
+import { getTrainLog, listTrains, renameTrain, startTrain, stopTrain, trainTaskLabel } from '../api/train';
+import { getEvalLog, listEvals, renameEval, stopEval, type EvalTaskInfo } from '../api/eval';
+import { getExportLog, listExports, renameExport, stopExport } from '../api/export';
+import { listDeploys, getDeployLog, renameDeploy, stopDeploy } from '../api/deploy';
+import { listScripts, renameScript, stopScript } from '../api/scripts';
 
 /**
  * 首页（对话页）的任务工具集：创建四类任务、批量启动消融实验、列出现有任务、停止任务。

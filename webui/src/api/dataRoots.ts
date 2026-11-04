@@ -5,17 +5,18 @@
  * 不给写权限。偏好设置的「外部数据目录」组是它的管理界面。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 登记根列表（POST 返回登记后的最新列表，前端直接落 state） */
 export async function listDataRoots(): Promise<string[]> {
-  const res = await fetch('/api/data-roots');
+  const res = await fetch(apiBase() + '/api/data-roots');
   if (!res.ok) throw new Error(tStatic('api.readDataRootsFailed', { status: res.status }));
   return (await res.json()).roots;
 }
 
 export async function addDataRoot(path: string): Promise<string[]> {
-  const res = await fetch('/api/data-roots', {
+  const res = await fetch(apiBase() + '/api/data-roots', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
@@ -25,6 +26,6 @@ export async function addDataRoot(path: string): Promise<string[]> {
 }
 
 export async function removeDataRoot(path: string): Promise<void> {
-  const res = await fetch(`/api/data-roots?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/data-roots?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.removeFailed', { status: res.status }));
 }

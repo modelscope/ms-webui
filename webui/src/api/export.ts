@@ -7,7 +7,8 @@
  * 扫描进 artifacts 供详情页展示。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 导出任务的公开形态（后端 publicExportTask 的镜像） */
 export interface ExportTaskInfo {
@@ -39,7 +40,7 @@ export interface ExportTaskInfo {
 }
 
 export async function listExports(): Promise<ExportTaskInfo[]> {
-  const res = await fetch('/api/export');
+  const res = await fetch(apiBase() + '/api/export');
   if (!res.ok) throw new Error(tStatic('api.loadExportListFailed', { status: res.status }));
   return (await res.json()).tasks;
 }
@@ -64,7 +65,7 @@ export async function startExport(input: {
   /** 「将要执行」直写的附加参数原文（按空白切分追加，引号包裹保留空格） */
   extraArgs?: string;
 }): Promise<string> {
-  const res = await fetch('/api/export', {
+  const res = await fetch(apiBase() + '/api/export', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -74,13 +75,13 @@ export async function startExport(input: {
 }
 
 export async function stopExport(id: string): Promise<void> {
-  const res = await fetch(`/api/export/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/export/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.stopFailed', { status: res.status }));
 }
 
 /** 重命名：只改 webui 里的显示名，不触碰任务本体与产物 */
 export async function renameExport(id: string, name: string): Promise<void> {
-  const res = await fetch(`/api/export/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${apiBase()}/api/export/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -89,7 +90,7 @@ export async function renameExport(id: string, name: string): Promise<void> {
 }
 
 export async function getExportLog(id: string): Promise<string[]> {
-  const res = await fetch(`/api/export/${encodeURIComponent(id)}/log`);
+  const res = await fetch(`${apiBase()}/api/export/${encodeURIComponent(id)}/log`);
   if (!res.ok) throw new Error(tStatic('api.readLogFailed', { status: res.status }));
   return (await res.json()).lines;
 }

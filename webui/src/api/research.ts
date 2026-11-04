@@ -6,8 +6,9 @@
  * 唤醒主模型；页面关闭期间事件积压在服务端，回来时一次交付。
  */
 
-import type { MessageKey } from '@/i18n';
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import type { MessageKey } from '../i18n/static';
+import { tStatic } from '../i18n/static';
 
 export interface ResearchMetric {
   kind: 'evalscope' | 'custom';
@@ -87,13 +88,13 @@ export interface ResearchSession {
 export type ResearchSummary = Omit<ResearchSession, 'events' | 'eventLog'>;
 
 export async function listResearch(): Promise<ResearchSummary[]> {
-  const res = await fetch('/api/research');
+  const res = await fetch(apiBase() + '/api/research');
   if (!res.ok) throw new Error(tStatic('api.loadResearchListFailed', { status: res.status }));
   return (await res.json()).sessions;
 }
 
 export async function getResearch(id: string): Promise<ResearchSession> {
-  const res = await fetch(`/api/research/${encodeURIComponent(id)}`);
+  const res = await fetch(`${apiBase()}/api/research/${encodeURIComponent(id)}`);
   if (!res.ok) throw new Error((await res.json()).error ?? tStatic('api.loadFailed'));
   return (await res.json()).session;
 }
@@ -113,7 +114,7 @@ export async function createResearch(input: {
   budget: { maxIterations: number };
   trainConfig?: ResearchTrainConfig;
 }): Promise<ResearchSession> {
-  const res = await fetch('/api/research', {
+  const res = await fetch(apiBase() + '/api/research', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -138,7 +139,7 @@ export async function updateResearch(
     trainConfig?: ResearchTrainConfig;
   },
 ): Promise<ResearchSession> {
-  const res = await fetch(`/api/research/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${apiBase()}/api/research/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
@@ -151,13 +152,13 @@ export async function updateResearch(
 export async function consumeResearchEvents(
   id: string,
 ): Promise<Array<{ at: string; kind: string; text: string }>> {
-  const res = await fetch(`/api/research/${encodeURIComponent(id)}/events?consume=1`);
+  const res = await fetch(`${apiBase()}/api/research/${encodeURIComponent(id)}/events?consume=1`);
   if (!res.ok) throw new Error(tStatic('api.readEventsFailed', { status: res.status }));
   return (await res.json()).events;
 }
 
 /** 停止研究会话：只断 watcher 关联，不停训练/评测（走各自任务页） */
 export async function stopResearch(id: string): Promise<void> {
-  const res = await fetch(`/api/research/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/research/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.stopFailed', { status: res.status }));
 }

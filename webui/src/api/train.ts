@@ -8,7 +8,8 @@
  * 的附加参数走 extraArgs。完整 spawn 参数由后端在创建时拼好存 args。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 从训练日志解析出的单条指标（swift 的 logging_steps 行） */
 export interface TrainMetric {
@@ -58,7 +59,7 @@ export interface TrainTaskInfo {
 }
 
 export async function listTrains(): Promise<TrainTaskInfo[]> {
-  const res = await fetch('/api/train');
+  const res = await fetch(apiBase() + '/api/train');
   if (!res.ok) throw new Error(tStatic('api.loadTrainListFailed', { status: res.status }));
   return (await res.json()).tasks;
 }
@@ -87,7 +88,7 @@ export async function startTrain(input: {
   /** 续跑血缘：从哪个任务的 checkpoint 恢复（一键续跑/研究迭代传入） */
   parentTaskId?: string;
 }): Promise<string> {
-  const res = await fetch('/api/train', {
+  const res = await fetch(apiBase() + '/api/train', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -107,7 +108,7 @@ export async function startCodeTrain(input: {
   name?: string;
   gpus?: number[];
 }): Promise<string> {
-  const res = await fetch('/api/train', {
+  const res = await fetch(apiBase() + '/api/train', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mode: 'code', ...input }),
@@ -117,7 +118,7 @@ export async function startCodeTrain(input: {
 }
 
 export async function stopTrain(id: string): Promise<void> {
-  const res = await fetch(`/api/train/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/train/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.stopFailed', { status: res.status }));
 }
 
@@ -139,14 +140,14 @@ export interface TrainCheckpointsInfo {
 
 /** 断点清单 + 最新断点（续跑事实源）；不存在的任务 404 抛错 */
 export async function listTrainCheckpoints(id: string): Promise<TrainCheckpointsInfo> {
-  const res = await fetch(`/api/train/${encodeURIComponent(id)}/checkpoints`);
+  const res = await fetch(`${apiBase()}/api/train/${encodeURIComponent(id)}/checkpoints`);
   if (!res.ok) throw new Error(tStatic('api.loadFailed', { status: res.status }));
   return (await res.json()) as TrainCheckpointsInfo;
 }
 
 /** 清理旧断点：保留最新 keep 个，其余删除；返回删掉的与保留的名字 */
 export async function pruneCheckpoints(id: string, keep = 1): Promise<{ pruned: string[]; kept: string[] }> {
-  const res = await fetch(`/api/train/${encodeURIComponent(id)}/prune`, {
+  const res = await fetch(`${apiBase()}/api/train/${encodeURIComponent(id)}/prune`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ keep }),
@@ -157,7 +158,7 @@ export async function pruneCheckpoints(id: string, keep = 1): Promise<{ pruned: 
 
 /** 重命名：只改 webui 里的显示名，不触碰任务本体与输出目录 */
 export async function renameTrain(id: string, name: string): Promise<void> {
-  const res = await fetch(`/api/train/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${apiBase()}/api/train/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -167,7 +168,7 @@ export async function renameTrain(id: string, name: string): Promise<void> {
 
 /** 执行日志的环形缓冲尾部（与 eval/export/deploy 的 /log 端点同形态） */
 export async function getTrainLog(id: string): Promise<string[]> {
-  const res = await fetch(`/api/train/${encodeURIComponent(id)}/log`);
+  const res = await fetch(`${apiBase()}/api/train/${encodeURIComponent(id)}/log`);
   if (!res.ok) throw new Error(tStatic('api.readLogFailed', { status: res.status }));
   return (await res.json()).lines;
 }
@@ -227,7 +228,7 @@ export interface ModelStructure {
 }
 
 export async function fetchModelStructure(model: string): Promise<ModelStructure> {
-  const res = await fetch('/api/train/model-structure', {
+  const res = await fetch(apiBase() + '/api/train/model-structure', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model }),
@@ -243,7 +244,7 @@ export async function fetchDatasetPreview(
   dataset: string,
   n: number,
 ): Promise<{ rows: DatasetPreviewRow[]; truncated: boolean }> {
-  const res = await fetch('/api/train/dataset-preview', {
+  const res = await fetch(apiBase() + '/api/train/dataset-preview', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ dataset, n }),
@@ -254,7 +255,7 @@ export async function fetchDatasetPreview(
 
 /** 奖励规则名注册表（orm/prm）：判别奖励条目是规则名（不占组）还是模型 id（占独立组） */
 export async function listOrmRules(): Promise<{ orm: string[]; prm: string[] }> {
-  const res = await fetch('/api/train/orm-rules');
+  const res = await fetch(apiBase() + '/api/train/orm-rules');
   if (!res.ok) throw new Error(`orm-rules ${res.status}`);
   return res.json();
 }

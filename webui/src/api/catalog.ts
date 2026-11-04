@@ -6,7 +6,8 @@
  * SearchSelect/TagInput 都接受任意自由输入（本地路径、清单外的 hub id）。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 一条候选：id 是落进命令行的值，modelType/tags 仅辅助展示 */
 export interface CatalogEntry {
@@ -19,7 +20,7 @@ export interface CatalogEntry {
 }
 
 export async function listCatalog(): Promise<{ models: CatalogEntry[]; datasets: CatalogEntry[] }> {
-  const res = await fetch('/api/catalog');
+  const res = await fetch(apiBase() + '/api/catalog');
   if (!res.ok) throw new Error(tStatic('api.readCatalogFailed', { status: res.status }));
   return await res.json();
 }

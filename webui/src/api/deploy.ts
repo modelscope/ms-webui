@@ -7,7 +7,8 @@
  * 对话页与模型管理页直接可见。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 部署任务的公开形态（后端 publicTask 的镜像） */
 export interface DeployTaskInfo {
@@ -43,13 +44,13 @@ export interface GpuInfo {
 
 /** GPU 清单。无驱动或无卡的机器返回空数组 */
 export async function listGpus(): Promise<GpuInfo[]> {
-  const res = await fetch('/api/gpus');
+  const res = await fetch(apiBase() + '/api/gpus');
   if (!res.ok) throw new Error(tStatic('api.readGpusFailed', { status: res.status }));
   return (await res.json()).gpus;
 }
 
 export async function listDeploys(): Promise<DeployTaskInfo[]> {
-  const res = await fetch('/api/deploy');
+  const res = await fetch(apiBase() + '/api/deploy');
   if (!res.ok) throw new Error(tStatic('api.loadDeployListFailed', { status: res.status }));
   return (await res.json()).tasks;
 }
@@ -70,7 +71,7 @@ export async function startDeploy(input: {
   /** 「将要执行」直写的附加参数原文（按空白切分追加，引号包裹保留空格） */
   extraArgs?: string;
 }): Promise<string> {
-  const res = await fetch('/api/deploy', {
+  const res = await fetch(apiBase() + '/api/deploy', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -80,13 +81,13 @@ export async function startDeploy(input: {
 }
 
 export async function stopDeploy(id: string): Promise<void> {
-  const res = await fetch(`/api/deploy/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/deploy/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.stopFailed', { status: res.status }));
 }
 
 /** 重命名：只改 webui 里的显示名，不触碰任务本体与模型登记 */
 export async function renameDeploy(id: string, name: string): Promise<void> {
-  const res = await fetch(`/api/deploy/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${apiBase()}/api/deploy/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -95,7 +96,7 @@ export async function renameDeploy(id: string, name: string): Promise<void> {
 }
 
 export async function getDeployLog(id: string): Promise<string[]> {
-  const res = await fetch(`/api/deploy/${encodeURIComponent(id)}/log`);
+  const res = await fetch(`${apiBase()}/api/deploy/${encodeURIComponent(id)}/log`);
   if (!res.ok) throw new Error(tStatic('api.readLogFailed', { status: res.status }));
   return (await res.json()).lines;
 }

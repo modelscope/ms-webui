@@ -1,4 +1,4 @@
-import { streamChat, type ChatMessage, type DeltaParts, type ToolCall } from '@/api/models';
+import { streamChat, type ChatMessage, type DeltaParts, type ToolCall } from '../api/models';
 import { MAX_TOOL_ROUNDS } from './builtin';
 import { executeToolCall, toolSchemas, type AgentTool, type ToolContext } from './tools';
 

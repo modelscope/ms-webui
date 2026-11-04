@@ -6,7 +6,8 @@
  * 插件选择读它，选中即把 source 放进命令行 --external_plugins。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 一条插件登记（后端 StoredPlugin 的镜像） */
 export interface StoredPlugin {
@@ -20,14 +21,14 @@ export interface StoredPlugin {
 }
 
 export async function listPlugins(): Promise<StoredPlugin[]> {
-  const res = await fetch('/api/plugins');
+  const res = await fetch(apiBase() + '/api/plugins');
   if (!res.ok) throw new Error(tStatic('api.loadPluginsFailed', { status: res.status }));
   return (await res.json()).plugins;
 }
 
 /** 新增或按 id 覆盖一条登记 */
 export async function savePlugin(input: { id?: string; source: string; tags?: string[]; note?: string }): Promise<void> {
-  const res = await fetch('/api/plugins', {
+  const res = await fetch(apiBase() + '/api/plugins', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -36,6 +37,6 @@ export async function savePlugin(input: { id?: string; source: string; tags?: st
 }
 
 export async function deletePlugin(id: string): Promise<void> {
-  const res = await fetch(`/api/plugins/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/plugins/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.deleteFailed', { status: res.status }));
 }

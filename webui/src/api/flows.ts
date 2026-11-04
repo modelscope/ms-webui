@@ -6,7 +6,8 @@
  * 跨浏览器刷新与 dev server 重启存活。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 列表条目：不含画布声明（列表页载荷小） */
 export interface FlowSummary {
@@ -33,14 +34,14 @@ export interface FlowRecord extends FlowSummary {
 }
 
 export async function listFlows(): Promise<FlowSummary[]> {
-  const res = await fetch('/api/flows');
+  const res = await fetch(apiBase() + '/api/flows');
   if (!res.ok) throw new Error(tStatic('api.loadFlowsFailed', { status: res.status }));
   return (await res.json()).flows;
 }
 
 /** 从一个脚手架（或空白画布）创建新实验；graph 由调用方按脚手架序列化 */
 export async function createFlow(graph: FlowGraph, opts?: { name?: string; preset?: string }): Promise<string> {
-  const res = await fetch('/api/flows', {
+  const res = await fetch(apiBase() + '/api/flows', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ graph, ...opts }),
@@ -50,13 +51,13 @@ export async function createFlow(graph: FlowGraph, opts?: { name?: string; prese
 }
 
 export async function getFlow(id: string): Promise<FlowRecord> {
-  const res = await fetch(`/api/flows/${encodeURIComponent(id)}`);
+  const res = await fetch(`${apiBase()}/api/flows/${encodeURIComponent(id)}`);
   if (!res.ok) throw new Error(tStatic('api.loadFlowFailed', { status: res.status }));
   return (await res.json()).flow;
 }
 
 export async function saveFlow(id: string, patch: { name?: string; graph?: FlowGraph }): Promise<void> {
-  const res = await fetch(`/api/flows/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${apiBase()}/api/flows/${encodeURIComponent(id)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
@@ -65,6 +66,6 @@ export async function saveFlow(id: string, patch: { name?: string; graph?: FlowG
 }
 
 export async function deleteFlow(id: string): Promise<void> {
-  const res = await fetch(`/api/flows/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/flows/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.deleteFlowFailed', { status: res.status }));
 }

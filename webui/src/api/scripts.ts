@@ -6,7 +6,8 @@
  * SIGTERM 停止、终态由退出码判定。任务由首页 agent 的 run_script 工具创建。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 脚本任务的公开形态（后端 publicScriptTask 的镜像） */
 export interface ScriptTaskInfo {
@@ -26,7 +27,7 @@ export interface ScriptTaskInfo {
 }
 
 export async function listScripts(): Promise<ScriptTaskInfo[]> {
-  const res = await fetch('/api/scripts');
+  const res = await fetch(apiBase() + '/api/scripts');
   if (!res.ok) throw new Error(tStatic('api.loadScriptsFailed', { status: res.status }));
   return (await res.json()).tasks;
 }
@@ -41,7 +42,7 @@ export async function startScript(
   conv?: string,
   modelId?: string,
 ): Promise<string> {
-  const res = await fetch('/api/scripts', {
+  const res = await fetch(apiBase() + '/api/scripts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -56,20 +57,20 @@ export async function startScript(
 }
 
 export async function getScriptLog(id: string): Promise<string[]> {
-  const res = await fetch(`/api/scripts/${encodeURIComponent(id)}/log`);
+  const res = await fetch(`${apiBase()}/api/scripts/${encodeURIComponent(id)}/log`);
   if (!res.ok) throw new Error(tStatic('api.readLogFailed', { status: res.status }));
   return (await res.json()).lines;
 }
 
 /** 停止（幂等：终态任务不改状态） */
 export async function stopScript(id: string): Promise<void> {
-  const res = await fetch(`/api/scripts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/scripts/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.stopFailed', { status: res.status }));
 }
 
 /** 重命名：只改 webui 里的显示名 */
 export async function renameScript(id: string, name: string): Promise<void> {
-  const res = await fetch(`/api/scripts/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${apiBase()}/api/scripts/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),

@@ -6,7 +6,8 @@
  * 回执——由 ChatPage 弹审批卡片，用户允许后带 ack 重发才真正执行。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 export interface FsEntry {
   name: string;
@@ -54,7 +55,7 @@ export async function fsTool(body: {
   fieldStats?: { distinct: number; truncated: boolean; top: [string, number][] };
   sizeBytes?: number;
 }> {
-  const res = await fetch('/api/tools/fs', {
+  const res = await fetch(apiBase() + '/api/tools/fs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -76,7 +77,7 @@ export async function shellTool(
 ): Promise<
   (ShellResult & { needApproval?: false }) | { needApproval: true; reason: string; command?: string }
 > {
-  const res = await fetch('/api/tools/shell', {
+  const res = await fetch(apiBase() + '/api/tools/shell', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cmd, ...(ack ? { ack: true } : {}) }),

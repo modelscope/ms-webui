@@ -1,4 +1,4 @@
-import type { ToolCall } from '@/api/models';
+import type { ToolCall } from '../api/models';
 
 /**
  * agent 工具的统一范式：一条工具 = OpenAI function schema + 执行器。

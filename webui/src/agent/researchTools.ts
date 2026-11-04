@@ -4,11 +4,11 @@ import {
   updateResearch,
   type ResearchIteration,
   type ResearchTrainConfig,
-} from '@/api/research';
-import { installChallenger, listChallengers } from '@/api/challenger';
-import { startDeploy } from '@/api/deploy';
-import { startExport } from '@/api/export';
-import { pruneCheckpoints, startTrain } from '@/api/train';
+} from '../api/research';
+import { installChallenger, listChallengers } from '../api/challenger';
+import { startDeploy } from '../api/deploy';
+import { startExport } from '../api/export';
+import { pruneCheckpoints, startTrain } from '../api/train';
 import { defineTool, type AgentTool } from './tools';
 
 /*

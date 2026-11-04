@@ -8,7 +8,8 @@
  * release 才终止 source 并关闭资源。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 画布节点的序列化形态（GraphNode 的 params 数组在这里转成 dict） */
 export interface WorkflowNodeDecl {
@@ -107,7 +108,7 @@ export async function startWorkflowRun(graph: {
   mode?: 'component' | 'full';
   steps?: number;
 }): Promise<WorkflowRunSubmission> {
-  const res = await fetch('/api/workflow', {
+  const res = await fetch(apiBase() + '/api/workflow', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ graph, ...opts }),
@@ -121,7 +122,7 @@ export async function startWorkflowRun(graph: {
 }
 
 export async function getWorkflowSession(id: string): Promise<WorkflowSessionSnapshot> {
-  const res = await fetch(`/api/workflow/${id}`);
+  const res = await fetch(`${apiBase()}/api/workflow/${id}`);
   if (!res.ok) throw new Error(tStatic('api.readRunFailed', { status: res.status }));
   return res.json();
 }
@@ -131,39 +132,39 @@ export async function getWorkflowSession(id: string): Promise<WorkflowSessionSna
  * （在途运行、节点灯、停止入口）从常驻会话接回来。无会话返回 null。
  */
 export async function getWorkflowSessionByKey(key: string): Promise<WorkflowSessionSnapshot | null> {
-  const res = await fetch(`/api/workflow?key=${encodeURIComponent(key)}`);
+  const res = await fetch(`${apiBase()}/api/workflow?key=${encodeURIComponent(key)}`);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(tStatic('api.readRunFailed', { status: res.status }));
   return res.json();
 }
 
 export async function getWorkflowLog(id: string): Promise<string[]> {
-  const res = await fetch(`/api/workflow/${id}/log`);
+  const res = await fetch(`${apiBase()}/api/workflow/${id}/log`);
   if (!res.ok) throw new Error(tStatic('api.readRunLogFailed', { status: res.status }));
   return (await res.json()).lines;
 }
 
 /** 停止本次图调用：会话与常驻资源保留 */
 export async function stopWorkflowRun(id: string): Promise<void> {
-  const res = await fetch(`/api/workflow/${id}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/workflow/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.stopRunFailed', { status: res.status }));
 }
 
 /** 暂停本次运行：运行中的节点完成，下一个节点边界起不再启动（回执立即） */
 export async function pauseWorkflowRun(id: string): Promise<void> {
-  const res = await fetch(`/api/workflow/${id}/pause`, { method: 'POST' });
+  const res = await fetch(`${apiBase()}/api/workflow/${id}/pause`, { method: 'POST' });
   if (!res.ok) throw new Error(tStatic('api.stopRunFailed', { status: res.status }));
 }
 
 /** 继续被暂停的运行 */
 export async function resumeWorkflowRun(id: string): Promise<void> {
-  const res = await fetch(`/api/workflow/${id}/resume`, { method: 'POST' });
+  const res = await fetch(`${apiBase()}/api/workflow/${id}/resume`, { method: 'POST' });
   if (!res.ok) throw new Error(tStatic('api.stopRunFailed', { status: res.status }));
 }
 
 /** 释放常驻会话：终止 source、关闭模型/采样器/工具 */
 export async function releaseWorkflowSession(id: string): Promise<void> {
-  const res = await fetch(`/api/workflow/${id}/release`, { method: 'POST' });
+  const res = await fetch(`${apiBase()}/api/workflow/${id}/release`, { method: 'POST' });
   if (!res.ok) throw new Error(tStatic('api.releaseRunFailed', { status: res.status }));
 }
 
@@ -194,7 +195,7 @@ export async function previewWorkflowOutput(
   id: string,
   opts: { nodeId: string; lane?: string; offset?: number; limit?: number },
 ): Promise<PreviewReply> {
-  const res = await fetch(`/api/workflow/${id}/preview`, {
+  const res = await fetch(`${apiBase()}/api/workflow/${id}/preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

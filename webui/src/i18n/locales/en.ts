@@ -278,6 +278,7 @@ export const en: Partial<MessageTable> = {
   'approval.deny': 'Deny',
   'approval.allow': 'Allow',
   'approval.alwaysAllow': "Always allow the '{command}' command in this session",
+  'approval.headlessBadge': 'Approval pending from headless research (raised while the browser was closed; resolving it resumes the loop)',
 
 
   /* ---------- RL dual-group placement ---------- */

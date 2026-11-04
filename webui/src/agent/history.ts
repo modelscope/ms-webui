@@ -1,5 +1,5 @@
 import { encode } from 'gpt-tokenizer';
-import { streamChat, type ChatMessage } from '@/api/models';
+import { streamChat, type ChatMessage } from '../api/models';
 
 /**
  * 对话历史压缩：token 估算超阈值时把旧消息摘要成一条 system 消息 + 保留
@@ -68,6 +68,41 @@ function cutPoint(dialogue: ChatMessage[]): number {
 /** 摘要的持久化（与会话消息本体分轨）：键 = 会话 id × 模型 id */
 const SUMMARY_KEY = 'swift-webui-summaries';
 
+/*
+ * 摘要持久化后端：默认浏览器 localStorage；node（server 侧 headless runner
+ * 复用本模块）启动时 setSummaryStorage 注入文件实现。接口只有读写两张
+ * 全表——摘要量小（每会话×模型一条），全表读写没有性能问题。
+ */
+export interface SummaryStorage {
+  load(): Record<string, StoredSummary>;
+  save(all: Record<string, StoredSummary>): void;
+}
+
+const localStorageBackend: SummaryStorage = {
+  load: () => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SUMMARY_KEY) ?? '{}');
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, StoredSummary>) : {};
+    } catch {
+      return {};
+    }
+  },
+  save: (all) => {
+    try {
+      localStorage.setItem(SUMMARY_KEY, JSON.stringify(all));
+    } catch {
+      /* 超配额等写失败：本轮摘要不持久化，下次重新摘（对话不受影响） */
+    }
+  },
+};
+
+let summaryStorage: SummaryStorage = localStorageBackend;
+
+/** node 侧注入文件后端用（浏览器侧永远用默认 localStorage） */
+export function setSummaryStorage(s: SummaryStorage): void {
+  summaryStorage = s;
+}
+
 interface StoredSummary {
   summary: string;
   /** 摘要已覆盖的对话消息条数（dialogue[0..covered) 的内容已进摘要） */
@@ -79,21 +114,20 @@ function summaryKey(convId: string, modelId: string): string {
 }
 
 function loadSummaries(): Record<string, StoredSummary> {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SUMMARY_KEY) ?? '{}');
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
+  return summaryStorage.load();
+}
+
+function saveSummaries(all: Record<string, StoredSummary>): void {
+  summaryStorage.save(all);
 }
 
 function saveSummary(convId: string, modelId: string, s: StoredSummary): void {
   try {
     const all = loadSummaries();
     all[summaryKey(convId, modelId)] = s;
-    localStorage.setItem(SUMMARY_KEY, JSON.stringify(all));
+    saveSummaries(all);
   } catch {
-    /* 超配额等写失败：本轮摘要不持久化，下次重新摘（对话不受影响） */
+    /* 写失败：本轮摘要不持久化，下次重新摘（对话不受影响） */
   }
 }
 
@@ -106,7 +140,7 @@ export function moveSummaries(convId: string, fromModel: string, toModel: string
     if (!all[fromKey] || all[toKey]) return;
     all[toKey] = all[fromKey];
     delete all[fromKey];
-    localStorage.setItem(SUMMARY_KEY, JSON.stringify(all));
+    saveSummaries(all);
   } catch {
     /* 同 saveSummary：搬家失败只是下次重新摘要 */
   }
@@ -119,7 +153,7 @@ export function removeSummaries(convId: string): void {
     for (const key of Object.keys(all)) {
       if (key.startsWith(`${convId}\u0000`)) delete all[key];
     }
-    localStorage.setItem(SUMMARY_KEY, JSON.stringify(all));
+    saveSummaries(all);
   } catch {
     /* 同 saveSummary：清理失败不影响删除本体 */
   }

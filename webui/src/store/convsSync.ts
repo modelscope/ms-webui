@@ -64,6 +64,14 @@ function pullMissing(srv: { chats?: unknown[]; turns?: Record<string, Record<str
           if (local[conv][model] === undefined) {
             local[conv][model] = msgs;
             added = true;
+          } else if (
+            /* headless 拉回：浏览器关闭期间 server 直写过轮次（桶更长），采用 server 版 */
+            Array.isArray(msgs) &&
+            Array.isArray(local[conv][model]) &&
+            msgs.length > (local[conv][model] as unknown[]).length
+          ) {
+            local[conv][model] = msgs;
+            added = true;
           }
         }
       }

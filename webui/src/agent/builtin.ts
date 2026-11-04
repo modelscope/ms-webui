@@ -1,9 +1,9 @@
-import { fsTool, shellTool } from '@/api/tools';
-import { webSearch, type SearchHit } from '@/api/search';
-import { readSkillDoc } from '@/api/skills';
-import { listCatalog, type CatalogEntry } from '@/api/catalog';
-import { envInfo } from '@/api/env';
-import { getScriptLog, listScripts, startScript, stopScript } from '@/api/scripts';
+import { fsTool, shellTool, type ShellResult } from '../api/tools';
+import { webSearch, type SearchHit } from '../api/search';
+import { readSkillDoc } from '../api/skills';
+import { listCatalog, type CatalogEntry } from '../api/catalog';
+import { envInfo } from '../api/env';
+import { getScriptLog, listScripts, startScript, stopScript } from '../api/scripts';
 import { defineTool, type AgentTool } from './tools';
 
 /**
@@ -467,12 +467,14 @@ export function workspaceTools(conv?: string, modelId?: string): AgentTool[] {
         if (r.needApproval) {
           return '命令获批后服务端仍要求审批（异常状态），未执行。';
         }
+        /* strictNullChecks 关闭时可选判别式不收窄，显式落到执行结果形态 */
+        const done = r as ShellResult;
         return [
-          `exit=${r.code}${r.timedOut ? '（超时被终止）' : ''}`,
+          `exit=${done.code}${done.timedOut ? '（超时被终止）' : ''}`,
           `stdout:`,
-          clipFeedback(r.stdout || '(空)', 'stdout '),
+          clipFeedback(done.stdout || '(空)', 'stdout '),
           `stderr:`,
-          clipFeedback(r.stderr || '(空)', 'stderr '),
+          clipFeedback(done.stderr || '(空)', 'stderr '),
         ].join('\n');
       },
     ),

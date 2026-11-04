@@ -49,6 +49,7 @@ import { EVAL_MODE_LABELS, EventLogPanel, IterationsPanel } from '@/pages/resear
 import { tStatic, useT, type MessageKey } from '@/i18n';
 import { runAgentLoop } from '@/agent/runAgentLoop';
 import { compressHistory, moveSummaries, removeSummaries } from '@/agent/history';
+import { composeWakeupMessage } from '@/agent/wakeup';
 import { useApproval } from '@/agent/useApproval';
 import { buildSkillsSystem, listSkills } from '@/api/skills';
 import { fsTool } from '@/api/tools';
@@ -65,19 +66,6 @@ const DEFAULT_PROMPT_KEY: MessageKey = 'chat.defaultPrompt';
 /** 会话当前绑定的研究会话（convId 匹配，取最新一个；stopped 视为解绑） */
 function boundResearch(list: ResearchSummary[], convId: string): ResearchSummary | null {
   return [...list].reverse().find((s) => s.convId === convId && s.status !== 'stopped') ?? null;
-}
-
-/*
- * autoresearch 事件唤醒的合成消息：多条事件合并成一条 user 消息（页面关闭
- * 期间积压的在重开时一次交付）。末尾一行行动引导补齐语境——事件到达时
- * 对话里可能没有过任何研究相关的上下文。
- */
-function composeWakeupMessage(s: ResearchSession, events: ResearchSession['events']): string {
-  return [
-    `[autoresearch 唤醒] 研究会话 ${s.id} · ${s.goal}`,
-    ...events.map((e) => `- [${e.kind}] ${e.text}`),
-    '按 autoresearch 指引决策：先读最新 session 再动账本；未达标走 Challenger 迭代或 resume，需要用户拍板就直接问。',
-  ].join('\n');
 }
 
 const THINKING_VALUES = ['off', 'mid', 'high'];
@@ -931,6 +919,39 @@ export function ChatPage() {
         }
         if (best) setSingle(best);
       }
+      /*
+       * headless 拉回（会话激活时）：浏览器关闭期间 server 可能直写过研究
+       * 轮次（convs.json 的桶比本地长）。比对后采用 server 版——否则一直开着
+       * 的旧标签页看不到 headless 轮次，还会在下次推送时用旧桶盖掉它们
+       * （服务端 PUT 守卫兜底，但这里先拉回就无竞态）。
+       */
+      void (async () => {
+        try {
+          const res = await fetch('/api/convs');
+          if (!res.ok) return;
+          const srv = (await res.json()) as { turns?: Record<string, Record<string, ChatMessage[]>> };
+          const srvBuckets = srv.turns?.[convParam];
+          if (!srvBuckets) return;
+          setTurns((prev) => {
+            let changed = false;
+            const localBuckets = prev[convParam] ?? {};
+            const merged: Record<string, ChatMessage[]> = { ...localBuckets };
+            for (const [m, msgs] of Object.entries(srvBuckets)) {
+              if (!Array.isArray(msgs)) continue;
+              if (!merged[m] || msgs.length > merged[m].length) {
+                merged[m] = msgs;
+                changed = true;
+                /* 拉回的桶逐个写穿透（读-改-写全量，不动其他桶）并触发镜像推送 */
+                saveTurns(convParam, m, msgs);
+              }
+            }
+            if (!changed) return prev;
+            return { ...prev, [convParam]: merged };
+          });
+        } catch {
+          /* 服务端不可达：本地态照常 */
+        }
+      })();
     } else {
       setActiveConv('');
       setStarted(false);
@@ -1045,8 +1066,56 @@ export function ChatPage() {
 
   /* shell 等立即执行类操作的审批状态机（统一 agent 层的 hook，卡片渲染在下方） */
   const { approval, alwaysAllow, setAlwaysAllow, requestApproval, settleApproval } = useApproval({
-    onAlwaysAllow: (command) => allowedCommands.current.add(command),
+    onAlwaysAllow: (command) => {
+      allowedCommands.current.add(command);
+      /* 同步 server 白名单：浏览器关闭后的 headless 续轮按同一份放行 */
+      void fetch('/api/headless/approvals/allow', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command }),
+      }).catch(() => undefined);
+    },
   });
+  /*
+   * headless 审批：浏览器关闭期间 server 侧研究回合挂起的审批，打开页面时
+   * 拉回来渲染（决定走 POST，挂起的 server 回合 1s 内恢复）；同拍把共用白名单
+   * 灌进本地允许集——「总是允许」跨 headless/浏览器一致生效。
+   */
+  const [headlessApprovals, setHeadlessApprovals] = useState<
+    { id: string; title: string; reason: string; command?: string }[]
+  >([]);
+  const [headlessAlways, setHeadlessAlways] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    if (!activeConv) {
+      setHeadlessApprovals([]);
+      return;
+    }
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/headless/approvals?conv=${encodeURIComponent(activeConv)}`);
+        if (!res.ok) return;
+        const r = (await res.json()) as {
+          approvals?: { id: string; title: string; reason: string; command?: string }[];
+          allowed?: string[];
+        };
+        for (const c of r.allowed ?? []) allowedCommands.current.add(c);
+        setHeadlessApprovals(r.approvals ?? []);
+      } catch {
+        /* 审批面暂不可达：下一拍重试 */
+      }
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), 5000);
+    return () => clearInterval(timer);
+  }, [activeConv]);
+  const resolveHeadlessApproval = (id: string, approve: boolean, allowCommand: boolean) => {
+    setHeadlessApprovals((prev) => prev.filter((a) => a.id !== id));
+    void fetch(`/api/headless/approvals/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approve, ...(allowCommand ? { alwaysAllow: true } : {}) }),
+    }).catch(() => undefined);
+  };
   /* 总闸放行版审批入口：交给 agent 工具层的统一形态 */
   const approveOrBypass = (title: string, reason: string, command?: string) =>
     noApproval ? Promise.resolve(true) : requestApproval(title, reason, command);
@@ -1882,6 +1951,41 @@ export function ChatPage() {
               </div>
             </div>
           )}
+
+          {/*
+           * headless 挂起审批：浏览器关闭期间 server 侧研究回合等的就是它——
+           * 决定后 server 回合恢复，研究继续自动迭代。样式与本地审批卡同构。
+           */}
+          {headlessApprovals.map((a) => (
+            <div key={a.id} className="border-state-failed/50 bg-card mb-3 rounded-xl border p-3.5">
+              <div className="text-foreground flex items-center gap-1.5 text-[13px] font-medium">
+                <ShieldAlert size={14} className="text-state-failed flex-none" />
+                {t('approval.title')}
+              </div>
+              <div className="text-muted-foreground mt-1 text-[11px]">{t('approval.headlessBadge')}</div>
+              <pre className="bg-muted mt-2 max-h-32 overflow-auto rounded-lg p-2.5 font-mono text-xs whitespace-pre-wrap break-all">
+                {a.title}
+              </pre>
+              <div className="text-muted-foreground mt-1.5 text-xs whitespace-pre-line">{a.reason}</div>
+              {a.command && (
+                <label className="text-muted-foreground mt-2 flex w-fit cursor-pointer items-center gap-1.5 text-xs">
+                  <Checkbox
+                    checked={headlessAlways[a.id] === true}
+                    onCheckedChange={(v) => setHeadlessAlways((prev) => ({ ...prev, [a.id]: v === true }))}
+                  />
+                  {t('approval.alwaysAllow', { command: a.command })}
+                </label>
+              )}
+              <div className="mt-2.5 flex justify-end gap-2">
+                <Button variant="ghost" size="sm" onClick={() => resolveHeadlessApproval(a.id, false, false)}>
+                  {t('approval.deny')}
+                </Button>
+                <Button size="sm" onClick={() => resolveHeadlessApproval(a.id, true, a.command ? headlessAlways[a.id] === true : false)}>
+                  {t('approval.allow')}
+                </Button>
+              </div>
+            </div>
+          ))}
 
           <div className="mt-3.5">
             <Composer state={composer} />

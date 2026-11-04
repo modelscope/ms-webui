@@ -6,7 +6,8 @@
  * key 只在服务端出现——列表接口返回掩码，聊天走服务端转发。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** 模型连接配置。apiKey 在前端侧永远是掩码或空串 */
 export interface ModelConfig {
@@ -48,14 +49,14 @@ export interface ToolCall {
 }
 
 export async function listModels(): Promise<ModelConfig[]> {
-  const res = await fetch('/api/models');
+  const res = await fetch(apiBase() + '/api/models');
   if (!res.ok) throw new Error(tStatic('api.loadModelsFailed', { status: res.status }));
   const data = (await res.json()) as { models: ModelConfig[] };
   return data.models;
 }
 
 export async function saveModel(config: ModelConfig): Promise<void> {
-  const res = await fetch('/api/models', {
+  const res = await fetch(apiBase() + '/api/models', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
@@ -64,7 +65,7 @@ export async function saveModel(config: ModelConfig): Promise<void> {
 }
 
 export async function deleteModel(id: string): Promise<void> {
-  const res = await fetch(`/api/models?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/models?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.deleteFailed', { status: res.status }));
 }
 
@@ -80,7 +81,7 @@ export interface MsDefaultModels {
 }
 
 export async function listMsModels(): Promise<MsDefaultModels> {
-  const res = await fetch('/api/ms-models');
+  const res = await fetch(apiBase() + '/api/ms-models');
   if (!res.ok) throw new Error(tStatic('api.readDefaultModelsFailed', { status: res.status }));
   return (await res.json()) as MsDefaultModels;
 }
@@ -375,7 +376,7 @@ export async function streamChat(
       ? new Error(tStatic('api.stallHeaders', { model: modelId, seconds: HEADERS_STALL_MS / 1000 }))
       : new Error(tStatic('api.stallChunk', { model: modelId, minutes: CHUNK_STALL_MS / 60_000 }));
   const doPost = () =>
-    fetch('/api/chat/completions', {
+    fetch(apiBase() + '/api/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

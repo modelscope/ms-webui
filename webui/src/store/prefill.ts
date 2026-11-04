@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import type { ModuleKey } from '@/theme/modules';
+import type { ModuleKey } from '../theme/modules';
 
 /** 需要预填通道的模块（workflow 本轮无工具，不在此列） */
 export type PrefillModule = Extract<ModuleKey, 'train' | 'eval' | 'export' | 'deploy'>;

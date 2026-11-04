@@ -7,7 +7,8 @@
  * 任务完成后逐集读回。
  */
 
-import { tStatic } from '@/i18n';
+import { apiBase } from './base';
+import { tStatic } from '../i18n/static';
 
 /** EvalScope 数据集注册表里的一项 */
 export interface EvalDatasetInfo {
@@ -71,13 +72,13 @@ export interface EvalTaskInfo {
 
 /** EvalScope 数据集注册表（207 个基准，服务端缓存） */
 export async function listEvalDatasets(): Promise<EvalDatasetInfo[]> {
-  const res = await fetch('/api/eval/datasets');
+  const res = await fetch(apiBase() + '/api/eval/datasets');
   if (!res.ok) throw new Error((await res.json()).error ?? tStatic('api.readDatasetListFailed', { status: res.status }));
   return (await res.json()).datasets;
 }
 
 export async function listEvals(): Promise<EvalTaskInfo[]> {
-  const res = await fetch('/api/eval');
+  const res = await fetch(apiBase() + '/api/eval');
   if (!res.ok) throw new Error(tStatic('api.loadEvalListFailed', { status: res.status }));
   return (await res.json()).tasks;
 }
@@ -93,7 +94,7 @@ export async function startEval(input: {
   /** 「将要执行」直写的附加参数原文（按空白切分追加） */
   extraArgs?: string;
 }): Promise<string> {
-  const res = await fetch('/api/eval', {
+  const res = await fetch(apiBase() + '/api/eval', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -103,13 +104,13 @@ export async function startEval(input: {
 }
 
 export async function stopEval(id: string): Promise<void> {
-  const res = await fetch(`/api/eval/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const res = await fetch(`${apiBase()}/api/eval/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(tStatic('api.stopFailed', { status: res.status }));
 }
 
 /** 重命名：只改 webui 里的显示名，不触碰任务本体与结果文件 */
 export async function renameEval(id: string, name: string): Promise<void> {
-  const res = await fetch(`/api/eval/${encodeURIComponent(id)}`, {
+  const res = await fetch(`${apiBase()}/api/eval/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -118,7 +119,7 @@ export async function renameEval(id: string, name: string): Promise<void> {
 }
 
 export async function getEvalLog(id: string): Promise<string[]> {
-  const res = await fetch(`/api/eval/${encodeURIComponent(id)}/log`);
+  const res = await fetch(`${apiBase()}/api/eval/${encodeURIComponent(id)}/log`);
   if (!res.ok) throw new Error(tStatic('api.readLogFailed', { status: res.status }));
   return (await res.json()).lines;
 }
