@@ -1,6 +1,6 @@
 import { streamChat, type ChatMessage, type DeltaParts, type ToolCall } from '../api/models';
 import { MAX_TOOL_ROUNDS } from './builtin';
-import { estimateTokens } from './history';
+import { CONTEXT_RESERVE_TOKENS, CONTEXT_TOKENS, estimateTokens } from './history';
 import { executeToolCall, toolSchemas, type AgentTool, type ToolContext } from './tools';
 
 /**
@@ -66,8 +66,15 @@ export interface AgentLoopOptions {
   events: AgentLoopEvents;
 }
 
-/** 单回合 history 的默认硬预算（对齐 history.ts 的上下文假设，留出输出余量） */
-const DEFAULT_HISTORY_BUDGET_TOKENS = 26000;
+/*
+ * 单回合 history 的默认硬预算 = 上下文 - 输出预留，与 compressHistory 的
+ * 阈值同源（CONTEXT_TOKENS - CONTEXT_RESERVE_TOKENS）：压缩把对话装到
+ * 「系统+对话 ≤ 该值」，预算也按同一上限判定——否则会话涨到压缩天花板
+ * 附近（还没触发压缩）时，每轮都超预算、每轮都发截短提示，截掉的恰是
+ * 真实上下文装得下的工具结果。此前硬编码 26000 比压缩天花板低约 2.7k，
+ * 正是这个形态。
+ */
+const DEFAULT_HISTORY_BUDGET_TOKENS = CONTEXT_TOKENS - CONTEXT_RESERVE_TOKENS;
 /** 预算截短的触发粒度：短于此的工具结果不值得截（截了也省不出多少） */
 const TRIM_MIN_CHARS = 2000;
 

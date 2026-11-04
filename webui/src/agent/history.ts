@@ -17,9 +17,9 @@ import { streamChat, type ChatMessage } from '../api/models';
 /** 触发阈值：约 32k 上下文的 75%。Qwen/DeepSeek 词表与 cl100k 有偏差，保守取值 */
 const COMPRESS_THRESHOLD_TOKENS = 24000;
 /** 模型上下文假设（32k 级）：与固定 system 注入合计后的总预算约束 */
-const CONTEXT_TOKENS = 32768;
+export const CONTEXT_TOKENS = 32768;
 /** 输出与编码偏差的预留量 */
-const CONTEXT_RESERVE_TOKENS = 4096;
+export const CONTEXT_RESERVE_TOKENS = 4096;
 /** 压缩后至少保留的对话空间：system 注入再大也不能把对话挤没 */
 const MIN_DIALOGUE_TOKENS = 6000;
 /** 压缩后保留原文的最近消息条数（对话轮语义，实际切点会对齐到 user 边界） */
