@@ -3127,6 +3127,39 @@ function probeEvalscope(): Promise<{ version: string } | null> {
 }
 
 /*
+ * evalscope 基准注册表清单：--eval_dataset 只认这里的精确名，访谈/建模时
+ * 模型要拿全名单才不会把版本注记拼进名字（live_code_bench (release_v6) 事故）。
+ * import evalscope 首次要几秒，进程内缓存只探一次；失败返回 null 不阻塞。
+ */
+let benchmarksCache: Promise<string[] | null> | null = null;
+function probeBenchmarks(): Promise<string[] | null> {
+  if (!benchmarksCache) {
+    benchmarksCache = new Promise((resolvePromise) => {
+      const proc = spawn(
+        resolvePython(),
+        ['-c', 'from evalscope.api.registry import BENCHMARK_REGISTRY; print(" ".join(sorted(BENCHMARK_REGISTRY)))'],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      let out = '';
+      const timer = setTimeout(() => proc.kill('SIGKILL'), 90_000);
+      proc.stdout?.on('data', (b: Buffer) => {
+        out += b.toString('utf-8');
+      });
+      proc.on('error', () => {
+        clearTimeout(timer);
+        resolvePromise(null);
+      });
+      proc.on('close', () => {
+        clearTimeout(timer);
+        const names = out.split(/\s+/).map((s) => s.trim()).filter(Boolean);
+        resolvePromise(names.length ? names : null);
+      });
+    });
+  }
+  return benchmarksCache;
+}
+
+/*
  * 模型缓存根：swift/评测链用 hub id 时权重落这里（MODELSCOPE_CACHE 可改默认
  * 位置），自建评测起 vllm 需要磁盘路径——报给模型省去逐层 find 探测。
  */
@@ -3542,7 +3575,12 @@ function swiftApiPlugin(): Plugin {
           return;
         }
         try {
-          const [gpus, swift, evalscope] = await Promise.all([queryGpus(), probeSwiftEnv(), probeEvalscope()]);
+          const [gpus, swift, evalscope, benchmarks] = await Promise.all([
+            queryGpus(),
+            probeSwiftEnv(),
+            probeEvalscope(),
+            probeBenchmarks(),
+          ]);
           res.setHeader('Content-Type', 'application/json');
           res.end(
             JSON.stringify({
@@ -3550,6 +3588,8 @@ function swiftApiPlugin(): Plugin {
               python: resolvePython(),
               swift,
               evalscope,
+              /* evalscope 基准注册表全名单（--eval_dataset 的合法值域；null=不可达） */
+              benchmarks,
               /* 模型缓存根 + 已缓存清单：自建评测/部署要磁盘权重路径，别再逐层 find */
               modelCache: modelCacheRoot(),
               cachedModels: cachedHubModels(),

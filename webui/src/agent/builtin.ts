@@ -607,8 +607,9 @@ export function envInfoTool(): AgentTool {
       function: {
         name: 'env_info',
         description:
-          '查询运行环境：本地 GPU 清单（卡号/型号/显存占用）、swift 版本与安装路径、python 解释器。' +
-          '规划训练/部署的用卡与并行度前先查这个，不要用 nvidia-smi 等命令探测',
+          '查询运行环境：本地 GPU 清单（卡号/型号/显存占用）、swift 版本与安装路径、python 解释器、' +
+          'evalscope 可用基准全名单（--eval_dataset / evalPlan 只认其中的精确名）。' +
+          '规划训练/部署的用卡与并行度、选定评测数据集前先查这个，不要用 nvidia-smi 等命令探测',
         parameters: { type: 'object', properties: {} },
       },
     },
@@ -624,6 +625,9 @@ export function envInfoTool(): AgentTool {
           `swift: ${env.swift ? `${env.swift.version}（安装于 ${env.swift.path}）` : '当前 python 环境未装 swift'}`,
           `python: ${env.python}`,
           `evalscope: ${env.evalscope ? env.evalscope.version : '未安装（评测链需自建 harness 或先安装）'}`,
+          env.benchmarks
+            ? `evalscope 可用基准（${env.benchmarks.length} 个，--eval_dataset 只认这些精确名，版本/subset/limit 注记不要写进名字）：\n${env.benchmarks.join(' ')}`
+            : 'evalscope 基准注册表暂不可达（需要 --eval_dataset 时先跑一条只读命令核对名字）',
           `模型缓存根: ${env.modelCache}`,
           env.cachedModels.length ? `已缓存模型: ${env.cachedModels.join('、')}` : '已缓存模型: （无）',
           '本地训练的 nproc_per_node 应等于所选卡数；远端/集群资源只声明卡数。',
