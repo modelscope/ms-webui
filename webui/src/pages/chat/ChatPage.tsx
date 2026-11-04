@@ -1350,6 +1350,8 @@ export function ChatPage() {
             /* 登录后的默认模型随请求带会话 token；其余模型不带头（服务端查 models.json） */
             ...(apiKey ? { apiKey } : {}),
             signal: abort.signal,
+            /* 页面回合标记：模型思考中途关页面时，中间件据此登记断口并触发续轮 */
+            convId: conv,
             events: {
               onAssistantStart: () => patch((msgs) => [...msgs, { role: 'assistant', content: '' }]),
               onDelta: (parts) =>

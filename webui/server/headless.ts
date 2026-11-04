@@ -76,6 +76,8 @@ export interface HeadlessHandle {
   headlessTick(): void;
   /** stall 哨兵的在飞判定用：headless 回合（含审批挂起）在跑即 true */
   headlessBusy(conv: string): boolean;
+  /** 页面泵心跳在线判定（与让位判据同源）：中断回合恢复用 */
+  isConvOnline(conv: string): boolean;
   listPendingApprovals(conv: string): HeadlessApproval[];
   /** 共用白名单（浏览器会话加载时灌进本地允许集，headless 与页面一致放行） */
   listAllowedCommands(): string[];
@@ -385,6 +387,10 @@ export function createHeadlessRunner(deps: HeadlessDeps): HeadlessHandle {
     },
     headlessBusy(conv) {
       return running.has(conv);
+    },
+    /** 页面泵心跳在线判定（与 headlessTick 的让位判据同源）：中断回合恢复用 */
+    isConvOnline(conv) {
+      return online(conv);
     },
     listPendingApprovals(conv) {
       return approvals.pending.filter((p) => p.conv === conv);

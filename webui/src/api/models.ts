@@ -347,6 +347,14 @@ export async function streamChat(
     tools?: unknown[];
     apiKey?: string;
     signal?: AbortSignal;
+    /**
+     * 发起对话的会话 id（页面回合才传）：随请求头 x-webui-conv 到达代理
+     * 中间件——页面关闭把流掐断时，中间件据此登记中断回合，宽限期后仍
+     * 无心跳即判定「页面已关（非用户主动停止）」，推一条续轮事件让
+     * headless 或回来的页面接着跑。node 侧（headless）不传：进程内
+     * fetch 不会中途断，断了也有 epoch 兜底。
+     */
+    convId?: string;
   },
 ): Promise<{ toolCalls: ToolCall[]; finishReason?: string }> {
   /*
@@ -381,6 +389,7 @@ export async function streamChat(
       headers: {
         'Content-Type': 'application/json',
         ...(options?.apiKey ? { 'x-swift-api-key': options.apiKey } : {}),
+        ...(options?.convId ? { 'x-webui-conv': options.convId } : {}),
       },
       body: JSON.stringify({
         model: modelId,

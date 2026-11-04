@@ -3356,8 +3356,37 @@ function swiftApiPlugin(): Plugin {
       /* 收编训练的运行期探活：5s 一拍（终态翻转不需要 2s 级敏捷），同上防叠加 */
       const trainAdoptTimer = setInterval(() => adoptTrainTick(), 5000);
       server.httpServer?.on('close', () => clearInterval(trainAdoptTimer));
+      /*
+       * 页面回合断口登记（conv → 客户端断开时刻）：页面回合的模型流被掐
+       * （模型思考中途关页面/断网）时由 chat 中间件写入，headlessTimer 的
+       * 中断恢复检查消费。页面在线期间的回合没有 server 侧执行体——这是
+       * 「浏览器可关」语义在模型决策半环上的最后一个缺口。
+       */
+      const pageTurnAborts = new Map<string, number>();
       /* headless 驱动同拍：寻找可接管的研究会话（浏览器离线 + 有积压事件） */
-      const headlessTimer = setInterval(() => headless?.headlessTick(), 5000);
+      const headlessTimer = setInterval(() => {
+        /*
+         * 中断回合恢复：断口满 10s 宽限后仍无该会话心跳 = 页面真的关了
+         * （用户主动停止则页面在、心跳在，不自动续以免违背停止意图）→ 给
+         * 绑定的非终态研究会话推一条续轮事件：页面回来的泵消费、页面不在
+         * 由下方 headlessTick 下一拍接管。
+         */
+        for (const [conv, at] of pageTurnAborts) {
+          if (Date.now() - at < 10_000) continue;
+          pageTurnAborts.delete(conv);
+          if (headless?.isConvOnline(conv)) continue;
+          const session = loadResearch().find(
+            (s) => s.convId === conv && s.status !== 'done' && s.status !== 'escalated' && s.status !== 'stopped',
+          );
+          if (!session) continue;
+          void pushResearchEvent(
+            session.id,
+            'turn-broken',
+            '上一回合被中断（页面在模型思考中途关闭，流断在半途）：先读对话尾部确认断点与已收到的部分输出，然后从中断处继续推进本回合该做的事。',
+          );
+        }
+        headless?.headlessTick();
+      }, 5000);
       server.httpServer?.on('close', () => clearInterval(headlessTimer));
       /*
        * 排障判别器（最前置）：所有进入的 /api 请求都留一行——请求只要到达
@@ -5859,14 +5888,25 @@ if (req.method === 'POST' && !seg0) {
           }
           const apiKey = sessionKey || config.apiKey;
           const { model: _id, ...openaiBody } = body;
+          const upstreamAbort = new AbortController();
+          const convHeader = req.headers['x-webui-conv'];
+          const conv = typeof convHeader === 'string' ? convHeader : '';
           /*
            * 客户端断开跟随中止：上游黑洞（连接建立却不消费请求体、不回响应）时
            * 浏览器侧迟早放弃/刷新/关页，若不跟随，中间件会一直持有挂死的上游
-           * fetch 与滞留在发送缓冲的请求体（连接泄漏）。req close = 浏览器连接
-           * 已断（正常完成后触发时 fetch 已结束，abort 是无害空操作）。
+           * fetch 与滞留在发送缓冲的请求体（连接泄漏）。挂 res 的 close（响应
+           * 完成与连接断开都触发，writableEnded 区分二者；req 的 close 在新版
+           * node 上只表示请求流消费完毕，连接中断不触发——实测不 fire）。
+           * 带 x-webui-conv 的页面回合另有断口登记：响应未写完而连接先断 =
+           * 回合被掐（关页面/断网），交给 headlessTimer 的中断恢复续轮。
            */
-          const upstreamAbort = new AbortController();
-          req.on('close', () => upstreamAbort.abort());
+          res.on('close', () => {
+            upstreamAbort.abort();
+            if (conv && !res.writableEnded) {
+              pageTurnAborts.set(conv, Date.now());
+              console.log(`[chat-break] conv=${conv} 登记断口（响应未完连接先断）`);
+            }
+          });
           /*
            * 服务端自己的响应头超时：预览链路的本地代理会保活与 vite 的连接，
            * 浏览器刷新/断开时代理不跟着断，req close 收不到信号——上游黑洞
