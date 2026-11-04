@@ -73,7 +73,14 @@ export function researchTools(conv: string, model: string): AgentTool[] {
               enum: ['during', 'checkpoint', 'parallel'],
               description: '评测时机：during=训练自带评测；checkpoint=训完评最新 ckpt（默认）；parallel=有空卡时边训边评',
             },
-            eval_dataset: { type: 'string', description: '评测数据（evalscope 基准名，或自定义 held-out 的标识）' },
+            eval_dataset: {
+              type: 'string',
+              description:
+                '评测数据。evalscope 通道必须填注册表精确名（小写下划线形，如 live_code_bench / humaneval / mbpp / gsm8k）——' +
+                '版本、subset、limit 等注记不要写进名字（括号注记会被注册表拒绝，limit 走单独参数）；' +
+                '内置 live_code_bench 是固化 lite 版，要精确 release 版本就填自建标识并选 custom 判分通道。' +
+                '自定义 held-out 数据集同理走 custom 通道。',
+            },
             metric_name: {
               type: 'string',
               description: '判分指标名：evalscope 报告里的 metric 名（如 mean_acc / acc）；自定义判分时填判分输出的指标名',
