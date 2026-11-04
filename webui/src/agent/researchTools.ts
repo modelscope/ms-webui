@@ -44,6 +44,8 @@ export const AUTORESEARCH_GUIDE = [
   '- 每轮迭代用 update_research 记 note（改了什么、为什么）并维护 iterations 数组（index/dataVersion/trainTaskId/score 原样带回再加新条目）。事件文本里带的账本信息以服务端为准，改动前先读最新 session。',
   '- metric 用自建判分（metric_kind=custom）时：训练完成事件会把评测交还给你——对最新 checkpoint 用 run_script 跑自己的判分脚本（脚本完成会自动通知），分数写进该迭代的 score，达标与否由你对照阈值判断；evalscope 基准则由平台自动起评。',
   '- Challenger 数据生成组件优先：list_challengers 看可用组件，install_challenger 装进工作空间后 run_script 跑（带参）；不合适才 read_file 读组件源码、edit_file 继承改写。护栏不可拆：评测集冻结（生成组件绝不读评测数据）；新数据必须落新版本目录；生成数据过行级校验才进训练。',
+  '- 控制调研面，别把研究做成源码考古：swift 的模板/loss/数据管线是框架既有能力，直接信任使用——不 read_swift_source 自证内部行为，数据验证三条即止（可编码、带监督 token、不超 max_length）；评测基准在数据集注册表里就交给平台自动评（evalscope），只有平台没有的指标才自建判分脚本。调研型脚本（探针/审计）累计超过三四个就停下来先推进主线训练。',
+  '- 里程碑必须记账：每完成一版数据（构造+验证通过）、每次关键诊断结论，都用 update_research 记进 iterations（可只填 index/dataVersion/note）再继续下一步——研究页的进展可见性、停摆后的断点恢复、stall 唤醒的定位全部依赖账本，埋头干活不记账等于把进度藏起来。',
   '- 踩坑与结论沉淀进 workspace/EXPERIMENTS.md：排障确认根因后把「现象/根因/修法」三行 prepend 到文件头（先读再整写或 edit_file 顶部插入），研究收口时把实验结论（数据版本×分数×取舍）也补记——该文件头部会常驻注入你的上下文、跨研究跨会话生效，开新迭代前先看它避免重蹈已修过的坑。',
   '- 训练失败/失联先 list_checkpoints 查断点，倾向 --resume_from_checkpoint 续跑（start_train 的 params 里传 resume_from_checkpoint=<ckpt 绝对路径>）；事件里嵌的日志尾不够用时 read_task_log 深读归因；连续失败或无断点停止并上报。',
   '- 上报与收工同样走对话：达标总结（最终 checkpoint 路径、各轮分数、数据版本谱系），并可用 deploy_checkpoint 把最佳 checkpoint 直接部署成可对话服务（LoRA 免合并，就绪后对话页即可与它对话）或 export_checkpoint 固化/推 Hub；预算耗尽给出判断（数据问题还是方案上限）。研究随时可在「研究」页停止。',

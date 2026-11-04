@@ -2246,6 +2246,13 @@ interface ResearchSession {
   events: Array<{ at: string; kind: string; text: string }>;
   /** 事件历史（只增不删，研究页事件流的展示源；同截尾 200） */
   eventLog: Array<{ at: string; kind: string; text: string }>;
+  /*
+   * 停摆哨兵的记账：stallSince = 连续无在飞任务的起点（ms 时间戳，有在飞即清
+   * 零）；lastStallAt = 上次发 stall 事件的时刻（1 小时冷却，防事件轰炸）。旧
+   * 会话文件无这两个字段——读取方全部 ?? 0 兜底。
+   */
+  stallSince?: number;
+  lastStallAt?: number;
   createdAt: string;
 }
 
@@ -2418,10 +2425,54 @@ async function researchTick(): Promise<void> {
     try {
       if (session.status === 'training') await watchResearchTrain(session);
       else if (session.status === 'evaluating') await watchResearchEval(session);
+      /* 停摆哨兵对全部非终态生效：preparing/deciding 没有专属 watcher，最易停摆 */
+      if (session.status !== 'done' && session.status !== 'escalated' && session.status !== 'stopped') {
+        await watchResearchStall(session);
+      }
     } catch {
       /* 单会话异常不拖垮整拍 */
     }
   }
+}
+
+/*
+ * 停摆哨兵：非终态会话连续 30 分钟无在飞任务（训练/评测/脚本全无、也无审批
+ * 在等）时补发一次 stall 唤醒。事件驱动只覆盖「任务终态」这一个复活出口——
+ * 续轮流中断、页面关闭吞掉唤醒、模型回合话说一半断掉，都会把会话留在
+ * 「无任务、无审批、非终态」的三不管地带且无人再叫醒它。哨兵是这条纪律的
+ * 机制化兜底：1 小时冷却防轰炸；有任务回到在飞即清零计时。
+ */
+async function watchResearchStall(session: ResearchSession): Promise<void> {
+  const busy =
+    /* 账本最新的训练/评测任务仍在跑 */
+    [...session.iterations].reverse().some((it) => {
+      const t = it.trainTaskId ? trainTasks.get(it.trainTaskId) : undefined;
+      const e = it.evalTaskId ? evalTasks.get(it.evalTaskId) : undefined;
+      return (t && t.status === 'running') || (e && (e.status === 'running' || e.status === 'starting'));
+    }) ||
+    /* 该会话的对话还有后台脚本在跑 */
+    [...scriptTasks.values()].some((s) => s.conv === session.convId && s.status === 'running');
+  if (busy) {
+    if (session.stallSince) await mutateResearch(session.id, (s) => { s.stallSince = undefined; });
+    return;
+  }
+  const now = Date.now();
+  const since = session.stallSince ?? now;
+  if (!session.stallSince) {
+    await mutateResearch(session.id, (s) => { s.stallSince = since; });
+  }
+  const STALL_AFTER_MS = 30 * 60_000;
+  const STALL_COOLDOWN_MS = 60 * 60_000;
+  if (now - since < STALL_AFTER_MS) return;
+  if (now - (session.lastStallAt ?? 0) < STALL_COOLDOWN_MS) return;
+  await pushResearchEvent(
+    session.id,
+    'stall',
+    `研究会话已 30 分钟无在飞任务（无训练/评测/脚本在跑、无审批等待），停在 ${session.status}。上一动作可能中断（失败的脚本、断掉的回合）：先读最新事件与账本定位断点，修复后继续推进（数据就绪就 start_train）；无法推进就总结现状并上报用户，不要停在原地。`,
+  );
+  await mutateResearch(session.id, (s) => {
+    s.lastStallAt = now;
+  });
 }
 
 async function watchResearchTrain(session: ResearchSession): Promise<void> {
