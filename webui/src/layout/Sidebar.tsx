@@ -12,7 +12,6 @@ import { Boxes,
   Network,
   Package,
   Plug,
-  Plus,
   Rocket,
   Search,
   SquareTerminal,
@@ -147,31 +146,13 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
       extra,
     );
 
-  /** 一个模块的导航行：折叠态包 tooltip（悬停见全名），对话行带 + 按钮 */
+  /** 一个模块的导航行：折叠态包 tooltip（悬停见全名） */
   const renderModule = (m: (typeof MODULES)[ModuleKey]) => {
     const active = current.key === m.key;
     const link = (
-      <Link
-        to={m.path}
-        data-tour={m.key}
-        className={row(
-          active,
-          /* 对话行右侧留出脱离行外的 + 按钮位置 */
-          !collapsed && m.key === 'chat' ? 'pe-1' : undefined,
-        )}
-      >
+      <Link to={m.path} data-tour={m.key} className={row(active)}>
         <span className="inline-flex text-current opacity-90">{ICONS[m.key]}</span>
         {!collapsed && t(m.label)}
-        {!collapsed && m.key === 'chat' && (
-          <span className="ms-auto">
-            <ChromeIconButton
-              icon={<Plus size={13} />}
-              label={t('common.newChat')}
-              size={24}
-              onClick={() => navigate('/chat')}
-            />
-          </span>
-        )}
       </Link>
     );
     return collapsed ? (

@@ -1747,11 +1747,9 @@ export function ChatPage() {
           chats={chats}
           activeConv={activeConv}
           onOpen={(id) => {
-            /* 再点当前会话 = toggle 收回首页；其他会话照常切换（URL 记住，可刷新恢复） */
-            if (id === activeConv) {
-              goHome();
-              return;
-            }
+            /* 点当前会话无操作（主流聊天语义——toggle 回首页被实测用户当 bug 报）；
+             * 回首页走「新建对话」按钮或侧栏「对话」导航 */
+            if (id === activeConv) return;
             setStarted(true);
             setSearchParams({ conv: id });
           }}
