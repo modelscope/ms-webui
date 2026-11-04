@@ -1240,8 +1240,41 @@ export function ChatPage() {
       saveTurns(conv, modelId, msgs);
       setTurns((prev) => ({ ...prev, [conv]: { ...(prev[conv] ?? {}), [modelId]: msgs } }));
     };
+    /*
+     * 回合开工前拉回 server 桶（仅续聊会话）：页面关闭/后台期间 headless 可能
+     * 续写过轮次（研究续轮、中断恢复），而下面用的 turns 是 render 时的闭包
+     * 快照——基于旧历史跑回合会与 server 分叉，PUT 二选一必丢一边。拉回采用
+     * 更长的 server 桶并写穿透（不阻塞太久：本机请求，失败静默走本地态）。
+     */
+    let baseTurns = turns[conv] ?? {};
+    if (activeConv) {
+      try {
+        const r = await fetch('/api/convs');
+        if (r.ok) {
+          const srv = (await r.json()) as { turns?: Record<string, Record<string, ChatMessage[]>> };
+          const sb = srv.turns?.[conv];
+          if (sb) {
+            let changed = false;
+            const merged: Record<string, ChatMessage[]> = { ...baseTurns };
+            for (const [m, msgs] of Object.entries(sb)) {
+              if (Array.isArray(msgs) && msgs.length > (baseTurns[m]?.length ?? 0)) {
+                merged[m] = msgs;
+                changed = true;
+                saveTurns(conv, m, msgs);
+              }
+            }
+            if (changed) {
+              baseTurns = merged;
+              setTurns((prev) => ({ ...prev, [conv]: { ...(prev[conv] ?? {}), ...merged } }));
+            }
+          }
+        }
+      } catch {
+        /* 拉不回（服务暂不可达）：本地态照常开工 */
+      }
+    }
     for (const x of targets) {
-      syncColumn(x, [...(turns[conv]?.[x] ?? []), userMsg]);
+      syncColumn(x, [...(baseTurns[x] ?? []), userMsg]);
     }
 
     /*

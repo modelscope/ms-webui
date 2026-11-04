@@ -78,6 +78,8 @@ export interface HeadlessHandle {
   headlessBusy(conv: string): boolean;
   /** 页面泵心跳在线判定（与让位判据同源）：中断回合恢复用 */
   isConvOnline(conv: string): boolean;
+  /** 浏览器拉回（GET /api/convs）打卡：PUT 放行要求本在线周期内拉回过 */
+  markPull(): void;
   listPendingApprovals(conv: string): HeadlessApproval[];
   /** 共用白名单（浏览器会话加载时灌进本地允许集，headless 与页面一致放行） */
   listAllowedCommands(): string[];
@@ -152,6 +154,14 @@ export function createHeadlessRunner(deps: HeadlessDeps): HeadlessHandle {
    * 浏览器才是主写入方。
    */
   const resumedAt = new Map<string, number>();
+  /*
+   * 浏览器最近一次拉回（GET /api/convs）的时刻：PUT 放行的第二道门。宽限
+   * 只保证「过了恢复初期」，不保证浏览器真的把 server 桶拉回去了——页面
+   * 打开后拉回 fetch 可能晚于第一次本地写触发的 PUT，放行会把旧桶推上来
+   * 盖掉 headless 轮次。要求拉回发生在恢复在线之后（浏览器至少看过一次
+   * server 现状）才放行。
+   */
+  let lastPullAt = 0;
   /** headless 回合锁：conv → model（在跑即占用，含审批挂起） */
   const running = new Map<string, string>();
   /** headless 写过、浏览器尚未拉回的 turns 桶（conv\u0000model） */
@@ -392,6 +402,10 @@ export function createHeadlessRunner(deps: HeadlessDeps): HeadlessHandle {
     isConvOnline(conv) {
       return online(conv);
     },
+    /** 浏览器拉回（GET /api/convs）打卡：PUT 放行要求本在线周期内拉回过 */
+    markPull() {
+      lastPullAt = Date.now();
+    },
     listPendingApprovals(conv) {
       return approvals.pending.filter((p) => p.conv === conv);
     },
@@ -430,7 +444,14 @@ export function createHeadlessRunner(deps: HeadlessDeps): HeadlessHandle {
          * dirty 保护的对象是「浏览器关闭期间」的 server 直写；刚恢复在线的
          * 宽限期内仍走长度保护（拉回未完成，旧桶 PUT 会盖掉 headless 轮次）。
          */
-        if (online(conv) && Date.now() - (resumedAt.get(conv) ?? 0) >= ONLINE_GRACE_MS) {
+        if (
+          online(conv) &&
+          Date.now() - (resumedAt.get(conv) ?? 0) >= ONLINE_GRACE_MS &&
+          /* 第二道门：本在线周期内浏览器拉回过（GET /api/convs 晚于恢复时刻）——
+           * 宽限过了但拉回还没完成的 PUT（页面打开后第一次本地写触发的推送）
+           * 仍是旧桶，放行会盖掉 headless 轮次 */
+          lastPullAt >= (resumedAt.get(conv) ?? 0)
+        ) {
           dirty.delete(key);
           continue;
         }

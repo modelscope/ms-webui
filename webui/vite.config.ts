@@ -5758,9 +5758,13 @@ if (req.method === 'POST' && !seg0) {
             return;
           }
           if (req.method === 'GET') {
+            /* 拉回打卡（响应完整送达后）：PUT 守卫放行的第二道门——浏览器看过
+             * server 现状才放行它覆盖 dirty 桶。打卡在 finish 而非受理时刻，
+             * 因为 PUT 推的 localStorage 在响应到达并 merge 之前仍是旧桶。 */
             res.setHeader('Content-Type', 'application/json');
             /* 坏文件按空库应答：浏览器本地态照常，拉回面拿不到东西不会误覆盖 */
             res.end(JSON.stringify(readConvs() ?? { chats: [], turns: {} }));
+            res.on('finish', () => headless?.markPull());
             return;
           }
           if (req.method === 'PUT') {
