@@ -19,6 +19,8 @@ export interface TurnSubmitPayload {
   sampling?: { temperature?: number; topP?: number; maxTokens?: number };
   /** 展览模式的会话 token（MS 默认模型；models.json 无 key 时必带） */
   apiKey?: string;
+  /** 免审总闸（配置浮层）：引擎侧同语义放行该回合的一切审批 */
+  noApproval?: boolean;
 }
 
 /** SSE 事件（与 server/turnEngine.ts 的 TurnEvent 同构；type-only 无法跨端共享，此处镜像） */

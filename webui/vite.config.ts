@@ -652,9 +652,13 @@ const SAFE_COMMANDS = new Set([
 
 /** 输出重定向里真正写文件的形态：/dev/null（丢弃输出）与 fd 复制（2>&1）不算写 */
 function redirectsToRealFile(cmd: string): boolean {
-  for (const m of cmd.matchAll(/(\d*)>>?\s*(\S+)/g)) {
-    const target = m[2];
-    if (target !== '/dev/null' && !target.startsWith('&')) return true;
+  /*
+   * target 不吃 ;/&/| 等 shell 段分隔符（\S+ 贪婪会把「2>/dev/null; echo」的
+   * target 连分号一起吞成 /dev/null;，豁免判定随之失效）；& 在排除类里，
+   * 2>&1 形态天然不匹配。只豁免 /dev/null。
+   */
+  for (const m of cmd.matchAll(/(\d*)>>?\s*([^;\s&|]+)/g)) {
+    if (m[2] !== '/dev/null') return true;
   }
   return false;
 }
@@ -5799,6 +5803,7 @@ if (req.method === 'POST' && !seg0) {
               tools?: unknown;
               title?: unknown;
               sampling?: unknown;
+              noApproval?: unknown;
             };
             const text = typeof body.text === 'string' ? body.text : '';
             const models = Array.isArray(body.models) ? body.models.filter((m): m is string => typeof m === 'string') : [];
@@ -5815,6 +5820,8 @@ if (req.method === 'POST' && !seg0) {
               res.end(JSON.stringify({ error: 'text 与 models 必填' }));
               return;
             }
+            /* 页面免审总闸：引擎侧同语义放行该回合的一切审批 */
+            const noApproval = body.noApproval === true;
             /* 展览模式的会话 token 随头走（与 /api/chat 代理同一取法） */
             const headerKey = req.headers['x-swift-api-key'];
             const apiKey = typeof headerKey === 'string' && headerKey ? headerKey : undefined;
@@ -5827,6 +5834,7 @@ if (req.method === 'POST' && !seg0) {
               ...(typeof body.title === 'string' ? { title: body.title } : {}),
               ...(sampling ? { sampling } : {}),
               ...(apiKey ? { apiKey } : {}),
+              ...(noApproval ? { noApproval: true } : {}),
             });
             if ('error' in r) {
               res.statusCode = 409;

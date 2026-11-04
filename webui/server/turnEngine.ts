@@ -74,6 +74,8 @@ export interface TurnSubmit {
   sampling?: { temperature?: number; topP?: number; maxTokens?: number };
   /** 展览模式的会话 token（MS 默认模型；models.json 无 key 时必带） */
   apiKey?: string;
+  /** 页面免审总闸：引擎侧同语义放行该回合的一切审批（唤醒回合不受影响） */
+  noApproval?: boolean;
 }
 
 /** SSE 推送的回合增量（页面订阅渲染的唯一事件面） */
@@ -233,12 +235,17 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
   };
 
   /*
-   * 引擎版 requestApproval：白名单命中放行；未命中挂起回合（落盘 pending，
-   * 1s 轮询等浏览器决定——挂起语义，无超时）。同会话旧 pending 未决时新请求
-   * 顶掉旧的（一张卡原则，与页面 useApproval 的「前一个未决自动拒绝」同构）。
+   * 引擎版 requestApproval：免审总闸或白名单命中放行；未命中挂起回合（落盘
+   * pending，1s 轮询等浏览器决定——挂起语义，无超时）。同会话旧 pending 未决
+   * 时新请求顶掉旧的（一张卡原则，与页面 useApproval 的「前一个未决自动拒绝」
+   * 同构）。
    */
-  const requestApproval = (conv: string, model: string) => (title: string, reason: string, command?: string) =>
+  const requestApproval = (conv: string, model: string, bypass: boolean) => (title: string, reason: string, command?: string) =>
     new Promise<boolean>((resolve) => {
+      if (bypass) {
+        resolve(true);
+        return;
+      }
       if (command && approvals.allowed.includes(command)) {
         resolve(true);
         return;
@@ -295,6 +302,8 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       abortable?: AbortController;
       /** 页面带来的会话 token（MS 默认模型；models.json 无 key 时必带） */
       apiKey?: string;
+      /** 页面免审总闸：该回合的一切审批直接放行 */
+      bypassApproval?: boolean;
     },
   ): Promise<void> => {
     const key = `${conv}\u0000${model}`;
@@ -339,7 +348,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         model,
         history,
         tools: opts.tools,
-        ctx: { requestApproval: requestApproval(conv, model), allowedCommands: new Set(approvals.allowed) },
+        ctx: { requestApproval: requestApproval(conv, model, opts.bypassApproval === true), allowedCommands: new Set(approvals.allowed) },
         sampling: opts.sampling ?? deps.chatDefaults(),
         ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
         ...(opts.abortable ? { signal: opts.abortable.signal } : {}),
@@ -406,6 +415,7 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
           sampling: req.sampling,
           abortable,
           ...(req.apiKey ? { apiKey: req.apiKey } : {}),
+          ...(req.noApproval ? { bypassApproval: true } : {}),
         });
       }
       return { turnId };

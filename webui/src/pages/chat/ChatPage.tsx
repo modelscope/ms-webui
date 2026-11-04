@@ -1062,6 +1062,9 @@ export function ChatPage() {
    * 清零、切换会话按新会话 id 重读——忘关风险不出标签页。
    */
   const [noApproval, setNoApprovalState] = useState(false);
+  /* 轮询闭包读最新总闸态用（effect 依赖里不含 noApproval，避免重订阅） */
+  const noApprovalRef = useRef(false);
+  noApprovalRef.current = noApproval;
   const prevConv = useRef('');
   useEffect(() => {
     try {
@@ -1128,7 +1131,17 @@ export function ChatPage() {
           allowed?: string[];
         };
         for (const c of r.allowed ?? []) allowedCommands.current.add(c);
-        setHeadlessApprovals(r.approvals ?? []);
+        const list = r.approvals ?? [];
+        /*
+         * 免审总闸开着：挂起的引擎审批（含浏览器关闭期间挂起的）直接自动
+         * 批准，不渲染卡——「本会话内所有操作免审批」的同一语义。不带
+         * alwaysAllow：免审是会话期意图，不进跨会话白名单。
+         */
+        if (list.length && noApprovalRef.current) {
+          for (const a of list) resolveHeadlessApproval(a.id, true, false);
+          return;
+        }
+        setHeadlessApprovals(list);
       } catch {
         /* 审批面暂不可达：下一拍重试 */
       }
@@ -1309,6 +1322,8 @@ export function ChatPage() {
         /* 新会话把标题交给引擎建档（server 侧 chats 注册表与本机 pushChat 同步） */
         ...(activeConv ? {} : { title }),
         ...(apiKey ? { apiKey } : {}),
+        /* 免审总闸：引擎侧对该回合的一切审批直接放行（原 approveOrBypass 的引擎等价物） */
+        ...(noApproval ? { noApproval: true } : {}),
         sampling: { temperature, topP, maxTokens },
       });
       if ('error' in r) {
