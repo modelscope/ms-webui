@@ -14,7 +14,7 @@ export interface FsEntry {
 }
 
 export async function fsTool(body: {
-  op: 'list' | 'read' | 'write' | 'edit' | 'grep';
+  op: 'list' | 'read' | 'write' | 'edit' | 'grep' | 'profile';
   path: string;
   content?: string;
   oldString?: string;
@@ -31,6 +31,8 @@ export async function fsTool(body: {
   /* grep：正则 + 命中数上限 */
   pattern?: string;
   maxResults?: number;
+  /* profile：统计哪个字段的值分布（可选） */
+  field?: string;
 }): Promise<{
   entries?: FsEntry[];
   content?: string;
@@ -44,6 +46,13 @@ export async function fsTool(body: {
   matches?: string[];
   truncated?: boolean;
   scanned?: number;
+  /* profile 结果（fieldStats 只在传 field 时给出） */
+  rows?: number;
+  badRows?: number;
+  columns?: string[];
+  samples?: string[];
+  fieldStats?: { distinct: number; truncated: boolean; top: [string, number][] };
+  sizeBytes?: number;
 }> {
   const res = await fetch('/api/tools/fs', {
     method: 'POST',

@@ -411,11 +411,13 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
       type: 'function',
       function: {
         name: 'list_tasks',
-        description: '列出一类现有任务（训练/评测/导出/部署）：id、状态、显示名。删除前先核对用它',
+        description:
+          '列出一类现有任务（训练/评测/导出/部署/脚本）：id、状态、显示名。' +
+          '脚本条目带运行时长与日志尾——一眼看全在飞脚本，不用逐个 read_script_log。删除前先核对用它',
         parameters: {
           type: 'object',
           properties: {
-            type: { type: 'string', enum: ['train', 'eval', 'export', 'deploy'], description: '任务类型' },
+            type: { type: 'string', enum: ['train', 'eval', 'export', 'deploy', 'script'], description: '任务类型' },
           },
           required: ['type'],
         },
@@ -448,6 +450,16 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
         } else if (type === 'deploy') {
           const tasks = await listDeploys();
           lines.push(...tasks.map((t) => `- ${t.id} · ${t.status} · ${t.name ?? t.servedName}`));
+        } else if (type === 'script') {
+          const tasks = await listScripts();
+          /* 运行中带时长，附日志尾一行：一次调用看全在飞脚本（替代反复 read_script_log 轮询） */
+          lines.push(
+            ...tasks.map((t) => {
+              const mins = Math.max(1, Math.round((Date.now() - new Date(`${t.startedAt.replace(' ', 'T')}Z`).getTime()) / 60_000));
+              const dur = t.status === 'running' ? `（已运行 ${mins} 分钟，完成会自动唤醒发起对话）` : '';
+              return `- ${t.id} · ${t.status}${dur} · ${t.name ?? t.script}`;
+            }),
+          );
         } else {
           return `未知任务类型: ${String(type)}`;
         }
@@ -522,7 +534,7 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
         parameters: {
           type: 'object',
           properties: {
-            type: { type: 'string', enum: ['train', 'eval', 'export', 'deploy'], description: '任务类型' },
+            type: { type: 'string', enum: ['train', 'eval', 'export', 'deploy', 'script'], description: '任务类型' },
             id: { type: 'string', description: '任务 id（list_tasks 给出的那个）' },
           },
           required: ['type', 'id'],
@@ -537,11 +549,12 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
         eval: stopEval,
         export: stopExport,
         deploy: stopDeploy,
+        script: stopScript,
       };
       const stop = stops[type];
       if (!stop) return `未知任务类型: ${type}`;
       if (!id) return '缺少任务 id；先用 list_tasks 核对。';
-      const labels: Record<string, string> = { train: '训练', eval: '评测', export: '导出', deploy: '部署' };
+      const labels: Record<string, string> = { train: '训练', eval: '评测', export: '导出', deploy: '部署', script: '脚本' };
       const ok = await ctx.requestApproval(
         `停止${labels[type]}任务 ${id}`,
         '停止会向任务进程发送 SIGTERM（优雅关停）；已产出的 checkpoint 与报告不受影响。',

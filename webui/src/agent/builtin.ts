@@ -3,7 +3,7 @@ import { webSearch, type SearchHit } from '@/api/search';
 import { readSkillDoc } from '@/api/skills';
 import { listCatalog, type CatalogEntry } from '@/api/catalog';
 import { envInfo } from '@/api/env';
-import { getScriptLog, startScript, stopScript } from '@/api/scripts';
+import { getScriptLog, listScripts, startScript, stopScript } from '@/api/scripts';
 import { defineTool, type AgentTool } from './tools';
 
 /**
@@ -126,6 +126,52 @@ export function workspaceTools(conv?: string, modelId?: string): AgentTool[] {
           /* 报错顺手指路：技能文档不在工作空间里，模型最常犯的就是拿它查技能 */
           return `${String(e instanceof Error ? e.message : e)}\n提示：技能文档（如 swift-usage/cli-reference.md）用 read_skill 工具读取；` +
             `${root === 'external' ? '外部路径需要用户先在「偏好设置 → 外部数据目录」里登记。' : '原始数据等外部路径走 root="external"（需用户已登记）。'}`;
+        }
+      },
+    ),
+    defineTool(
+      {
+        type: 'function',
+        function: {
+          name: 'dataset_profile',
+          description:
+            '一次调用给出数据文件画像：行数/字节/列名/抽样 3 条/字段值分布（csv/tsv/jsonl/json，支持 GB 级流式）。' +
+            '数据探查（几行、什么列、某字段取值）先用它，不要用 shell 连环 wc/head/grep 或单行 python 统计摸数据；' +
+            '需要更复杂的统计才写脚本 run_script',
+          parameters: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: '文件路径：workspace 根的相对路径，或 external 模式下的绝对路径' },
+              root: {
+                type: 'string',
+                enum: ['workspace', 'external'],
+                description: '默认 workspace；external = 用户在偏好设置里登记的外部数据目录',
+              },
+              field: { type: 'string', description: '可选：统计该字段的值分布（top 20 + distinct 总数）' },
+            },
+            required: ['path'],
+          },
+        },
+      },
+      async (args) => {
+        const path = String(args.path ?? '');
+        const root = args.root === 'external' ? 'external' : 'workspace';
+        const field = String(args.field ?? '').trim();
+        try {
+          const r = await fsTool({ op: 'profile', path, root, ...(field ? { field } : {}) });
+          const parts = [
+            `文件 ${path} · ${r.sizeBytes ?? '?'} 字节 · ${r.rows ?? '?'} 行 · 列 ${r.columns?.length ?? 0} 个` +
+              `${r.truncated ? '（扫描超 8s 截断，行数是下界）' : ''}${r.badRows ? ` · ${r.badRows} 行解析失败跳过` : ''}`,
+            r.columns?.length ? `列名：${r.columns.join('、')}` : '',
+            r.samples?.length ? `抽样（前 ${r.samples.length} 条）：\n${r.samples.join('\n')}` : '',
+            r.fieldStats
+              ? `字段 ${field} 值分布（distinct ${r.fieldStats.distinct}${r.fieldStats.truncated ? '（超上限只列 top）' : ''}）：\n` +
+                r.fieldStats.top.map(([v, c]) => `  ${v}: ${c}`).join('\n')
+              : '',
+          ].filter(Boolean);
+          return clipFeedback(parts.join('\n'), '数据画像 ');
+        } catch (e) {
+          return String(e instanceof Error ? e.message : e);
         }
       },
     ),
@@ -304,7 +350,9 @@ export function workspaceTools(conv?: string, modelId?: string): AgentTool[] {
         type: 'function',
         function: {
           name: 'read_script_log',
-          description: '读取一个脚本任务的日志（run_script 返回的 task_id），带 tail 只取最后 N 行',
+          description:
+            '读取一个脚本任务的日志（run_script 返回的 task_id），回执头部带任务状态与运行时长；带 tail 只取最后 N 行。' +
+            '脚本完成后会自动唤醒本对话——本工具只用于中途诊断（怀疑跑偏/失败归因），不要反复轮询进度',
           parameters: {
             type: 'object',
             properties: {
@@ -317,10 +365,31 @@ export function workspaceTools(conv?: string, modelId?: string): AgentTool[] {
       },
       async (args) => {
         try {
-          const lines = await getScriptLog(String(args.task_id ?? ''));
+          const taskId = String(args.task_id ?? '');
+          const lines = await getScriptLog(taskId);
+          /* 回执头部带任务状态（事实+建议动作同包）：运行中明说「完成会自动唤醒」，
+           * 终止模型把读日志当唯一进度手段的轮询循环（实测一次研究 83 次轮询） */
+          let head = '';
+          try {
+            const task = (await listScripts()).find((t) => t.id === taskId);
+            if (task) {
+              const mins = Math.max(
+                1,
+                Math.round((Date.now() - new Date(`${task.startedAt.replace(' ', 'T')}Z`).getTime()) / 60_000),
+              );
+              head =
+                task.status === 'running'
+                  ? `[脚本 ${taskId} · running · 已运行 ${mins} 分钟] 完成后会自动唤醒本对话，无需反复查看。\n`
+                  : `[脚本 ${taskId} · ${task.status} · 已结束]\n`;
+            }
+          } catch {
+            /* 任务表读取失败不影响日志本体 */
+          }
           const tail = Number.isInteger(args.tail) && Number(args.tail) > 0 ? Number(args.tail) : 0;
           const shown = tail ? lines.slice(-tail) : lines;
-          return shown.length ? clipFeedback(shown.join('\n'), '脚本日志 ') : '（暂无输出——脚本可能刚启动，稍后再查）';
+          return shown.length
+            ? clipFeedback(head + shown.join('\n'), '脚本日志 ')
+            : `${head}（暂无输出——脚本可能刚启动，稍后再查）`;
         } catch (e) {
           return String(e instanceof Error ? e.message : e);
         }
@@ -425,9 +494,9 @@ export const WORKBENCH_GUIDE = [
   '- 模型必须由用户指定（hub id 或本地路径）：缺了就把 list_catalog 的候选摆给用户挑，不要猜。',
   '- 算力规划用 env_info 查本地 GPU 清单与 swift 环境：本地训练的卡数决定 nproc_per_node（create_train 的 gpus 传卡号列表）；远端/集群资源只声明卡数（gpu_count），不传本机卡号。',
   '- 环境事实一次拿全：GPU/卡数、模型缓存根与已缓存模型、swift 与 evalscope 的版本可用性、python 解释器，全在 env_info 的返回里——不要为这些写 probe 脚本或连环 shell 探测（每条都要审批还烧轮次）；模板渲染、数据字段这类 swift 行为问题用 read_swift_source 仲裁。把精力放在数据集选择、模型选择、训练构型、实验设计、算法与指标设计上。',
-  '- 需要用户的原始数据时，先问清数据格式与存放路径：路径在工作空间外就请用户在「偏好设置 → 外部数据目录」里登记（只读），然后用 read_file/list_dir 的 root="external" 探查；大文件的分析用 shell 的 head/wc/jq（不受工作空间限制）。',
-  '- 前处理、数据分析这类长脚本：write_file 写进工作空间后用 run_script 后台执行（shell 有 30 秒超时）。脚本完成后会自动通知回本对话，可以先把回合结束等通知，中途看进度才用 read_script_log；修改已有文件用 edit_file  精确替换，不要 sed。',
-  '- 数据探查要合并成一次：把画像、统计、关系配对、抽样校验写成一个综合脚本跑完（run_script），输出只留汇总统计与少量样例（几十行）；不要连环小步 shell 逐步摸——每轮工具结果都进历史且逐轮重发，连环探查的 token 成本是轮数 × 上下文大小双倍放大。探查脚本的 print 自觉控制在汇总级，全量明细落文件、按需取片段。',
+  '- 需要用户的原始数据时，先问清数据格式与存放路径：路径在工作空间外就请用户在「偏好设置 → 外部数据目录」里登记（只读），然后用 dataset_profile/read_file/list_dir 的 root="external" 探查；大文件的分析用 shell 的 head/wc/jq（不受工作空间限制）。',
+  '- 前处理、数据分析这类长脚本：write_file 写进工作空间后用 run_script 后台执行（shell 有 30 秒超时）。脚本完成后会自动通知回本对话——启动后回合可以自然收尾等通知，中途诊断（怀疑跑偏/失败归因）才用 read_script_log，不要反复轮询进度；修改已有文件用 edit_file  精确替换，不要 sed。',
+  '- 数据探查第一步用 dataset_profile（一次拿行数/列名/抽样/字段分布，支持外部数据根）；它覆盖不了的更复杂统计（关系配对、交叉校验）才合并成一个综合脚本 run_script 跑完，输出只留汇总统计与少量样例（几十行）；不要连环小步 shell 逐步摸——每轮工具结果都进历史且逐轮重发，连环探查的 token 成本是轮数 × 上下文大小双倍放大。探查脚本的 print 自觉控制在汇总级，全量明细落文件、按需取片段。',
   '- 找信息先定位再取片段：grep（正则搜内容拿「文件:行号」）→ read_file 的 offset/limit 只读命中处几十行；不要整读文件、也不要用 shell 管道拼 head/tail/grep。大文件（原始数据、全量明细）永远走「grep 定位 + 行范围读」，整读是最后手段。',
   '- 写插件（自定义数据集、reward、tool 等 .py）落到 workspace/plugins/<名字>.py：插件页与训练等表单立即可见可选；自定义数据集的完整做法见 swift-usage 的 custom-data.md（read_skill 读取）。',
   '- 本工作台的交互形态：create_train 等工具是「跳转目标页并预填表单」，提交由用户在页面上点启动完成；跳转后页面助手会带着这段对话续聊，不必重复背景。',
@@ -579,13 +648,16 @@ export function readSwiftSourceTool(): AgentTool {
         name: 'read_swift_source',
         description:
           '读取当前 python 环境里安装的 swift 包源码（相对包根路径，如 "dev/config/train_config.py"；' +
-          'op=list 可列目录结构）。用于 skills 文档查不到的细节、或需要核实安装版本的真实行为时；' +
+          'op=list 可列目录结构）。长文件先 grep(root="swift") 定位行号，再用 offset/limit 读命中处片段，不要整读。' +
+          '用于 skills 文档查不到的细节、或需要核实安装版本的真实行为时；' +
           '日常用法问题先查 skills 文档，源码是仲裁手段不是首选',
         parameters: {
           type: 'object',
           properties: {
             path: { type: 'string', description: '相对 swift 包根的路径；list 时可用 "." 或目录路径' },
             op: { type: 'string', enum: ['read', 'list'], description: '读文件（默认）还是列目录' },
+            offset: { type: 'integer', description: '起始行号（1-based，与 limit 配合读片段）' },
+            limit: { type: 'integer', description: '读取行数（默认前 200 行，上限 2000）' },
           },
           required: ['path'],
         },
@@ -596,10 +668,24 @@ export function readSwiftSourceTool(): AgentTool {
       let path = String(args.path ?? '').replace(/^\/+/, '');
       if (path === 'swift' || path.startsWith('swift/')) path = path.slice('swift/'.length) || '.';
       const op = args.op === 'list' ? 'list' : 'read';
+      const offset = Number.isInteger(args.offset) && Number(args.offset) > 0 ? Number(args.offset) : undefined;
+      const limit = Number.isInteger(args.limit) && Number(args.limit) > 0 ? Number(args.limit) : undefined;
       try {
-        const r = await fsTool({ op, path, root: 'swift' });
+        const r = await fsTool({ op, path, root: 'swift', ...(offset ? { offset } : {}), ...(limit ? { limit } : {}) });
         if (op === 'list') return (r.entries ?? []).map((e) => `${e.name}${e.dir ? '/' : ''}`).join('\n') || '(空目录)';
-        return r.content ?? '';
+        /*
+         * 行范围元信息头 + 截断守卫，与 read_file 同构：源码文件动辄上千行，
+         * 无范围整读一次上万字符进历史且逐轮重发（实测回执量榜首）。
+         */
+        if (r.lines !== undefined) {
+          const start = r.offset ?? offset ?? 1;
+          const end = start + r.lines - 1;
+          const rangeNote = r.reachedEnd
+            ? `（第 ${start}–${end} 行，已到文件尾）`
+            : `（第 ${start}–${end} 行，其后还有内容——续读传 offset=${end + 1}）`;
+          return clipFeedback(`${rangeNote}\n${r.content ?? ''}`, 'swift 源码 ');
+        }
+        return clipFeedback(r.content ?? '', 'swift 源码 ');
       } catch (e) {
         return String(e instanceof Error ? e.message : e);
       }

@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
 import { homedir } from 'node:os';
-import { join, resolve, sep, dirname, relative } from 'node:path';
+import { join, resolve, sep, dirname, extname, relative } from 'node:path';
 import { Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
 import { readFileSync, writeFileSync, appendFileSync, renameSync, rmSync, statfsSync, mkdirSync, existsSync, readdirSync, statSync, realpathSync, createReadStream, openSync, readSync, closeSync } from 'node:fs';
@@ -795,6 +795,103 @@ function readLines(abs: string, offset: number, limit: number): Promise<{ lines:
     rl.on('close', () => {
       reachedEnd = !earlyStop;
       resolvePromise({ lines: collected, reachedEnd });
+    });
+    rl.on('error', rejectPromise);
+  });
+}
+
+/*
+ * agent 定位原语之三——数据文件画像：一次扫描给出行数/字节/列名/抽样/可选
+ * 字段值分布。吃掉「wc -l + head + 手写单行统计」这类数据探查微操作（实测
+ * 一次研究里 shell 探查 200+ 次里近半是这类）。csv/tsv 按分隔符切列、jsonl
+ * 每行一个 JSON 对象（解析失败计 badRows 跳过）；GB 级文件流式统计，时间
+ * 预算 8s（超时停止计数并标记 truncated——行数是下界，不冒充完整）。
+ */
+interface ProfileStats {
+  distinct: number;
+  /** distinct 超过收集上限（5000）时为 true：分布只列 top 20 */
+  truncated: boolean;
+  top: [string, number][];
+}
+
+interface ProfileResult {
+  sizeBytes: number;
+  rows: number;
+  badRows: number;
+  columns: string[];
+  /** 抽样记录（每条截 500 字）：头部前几条，不是随机抽样 */
+  samples: string[];
+  fieldStats?: ProfileStats;
+  truncated: boolean;
+}
+
+const PROFILE_COLUMN_SAMPLE = 500;
+const PROFILE_SAMPLE_COUNT = 3;
+const PROFILE_STATS_CAP = 5000;
+const PROFILE_TOP_N = 20;
+
+function profileFile(abs: string, field?: string): Promise<ProfileResult> {
+  const ext = extname(abs).toLowerCase();
+  return new Promise((resolvePromise, rejectPromise) => {
+    const delimiter = ext === '.tsv' ? '\t' : ',';
+    const result: ProfileResult = {
+      sizeBytes: statSync(abs).size,
+      rows: 0,
+      badRows: 0,
+      columns: [],
+      samples: [],
+      truncated: false,
+    };
+    const counts = new Map<string, number>();
+    const deadline = Date.now() + 8000;
+    const rl = createInterface({ input: createReadStream(abs, { encoding: 'utf-8' }), crlfDelay: Infinity });
+    rl.on('line', (line: string) => {
+      if (Date.now() > deadline) {
+        result.truncated = true;
+        rl.close();
+        return;
+      }
+      let record: Record<string, unknown> | null = null;
+      if (ext === '.jsonl') {
+        try {
+          const parsed = JSON.parse(line);
+          record = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+          if (!record) result.badRows += 1;
+        } catch {
+          result.badRows += 1;
+        }
+      } else {
+        const values = line.split(delimiter);
+        /* csv/tsv：第一行当表头，之后每行按列位置映射成记录 */
+        if (result.columns.length === 0) {
+          if (line.trim()) result.columns = values.map((c) => c.trim());
+          return;
+        }
+        record = Object.fromEntries(result.columns.map((c, i) => [c, values[i] ?? '']));
+      }
+      if (!record) return;
+      result.rows += 1;
+      if (result.rows <= PROFILE_COLUMN_SAMPLE) {
+        for (const k of Object.keys(record)) if (!result.columns.includes(k)) result.columns.push(k);
+        if (result.rows <= PROFILE_SAMPLE_COUNT) {
+          const s = JSON.stringify(record);
+          result.samples.push(s.length > 500 ? `${s.slice(0, 500)}…` : s);
+        }
+      }
+      if (field !== undefined && field !== '' && field in record) {
+        const v = String(record[field]);
+        if (counts.size < PROFILE_STATS_CAP || counts.has(v)) counts.set(v, (counts.get(v) ?? 0) + 1);
+      }
+    });
+    rl.on('close', () => {
+      if (field !== undefined && field !== '') {
+        result.fieldStats = {
+          distinct: counts.size,
+          truncated: counts.size >= PROFILE_STATS_CAP,
+          top: [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, PROFILE_TOP_N),
+        };
+      }
+      resolvePromise(result);
     });
     rl.on('error', rejectPromise);
   });
@@ -5780,6 +5877,8 @@ if (req.method === 'POST' && !seg0) {
             /* grep：正则 + 命中数上限 */
             pattern?: string;
             maxResults?: number;
+            /* profile：统计哪个字段的值分布（可选） */
+            field?: string;
           };
           let abs: string | null;
           let baseRoot: string;
@@ -5921,6 +6020,74 @@ if (req.method === 'POST' && !seg0) {
             );
             return;
           }
+          if (body.op === 'profile') {
+            if (!existsSync(abs) || statSync(abs).isDirectory()) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: `不是文件: ${body.path}` }));
+              return;
+            }
+            const ext = extname(abs).toLowerCase();
+            const field = body.field !== undefined ? String(body.field) : undefined;
+            if (ext === '.csv' || ext === '.tsv' || ext === '.jsonl') {
+              const r = await profileFile(abs, field);
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify(r));
+              return;
+            }
+            if (ext === '.json') {
+              /* 小 JSON（对象数组）整读画像；大 JSON 结构不定型，指路行范围读 */
+              if (statSync(abs).size > 512 * 1024) {
+                res.statusCode = 400;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'JSON 超过 512KB，结构不定型无法画像——用 read_file 的行范围读片段' }));
+                return;
+              }
+              let data: unknown;
+              try {
+                data = JSON.parse(readFileSync(abs, 'utf-8'));
+              } catch (e) {
+                res.statusCode = 400;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: `JSON 解析失败: ${e}` }));
+                return;
+              }
+              const records = Array.isArray(data) ? data.filter((x) => x && typeof x === 'object') : [data];
+              const columns: string[] = [];
+              for (const rec of records.slice(0, 500))
+                for (const k of Object.keys(rec as Record<string, unknown>)) if (!columns.includes(k)) columns.push(k);
+              const r: ProfileResult = {
+                sizeBytes: statSync(abs).size,
+                rows: records.length,
+                badRows: Array.isArray(data) ? data.length - records.length : 0,
+                columns,
+                samples: records.slice(0, PROFILE_SAMPLE_COUNT).map((rec) => {
+                  const s = JSON.stringify(rec);
+                  return s.length > 500 ? `${s.slice(0, 500)}…` : s;
+                }),
+                truncated: false,
+              };
+              if (field !== undefined && field !== '') {
+                const counts = new Map<string, number>();
+                for (const rec of records) {
+                  const v = String((rec as Record<string, unknown>)[field]);
+                  counts.set(v, (counts.get(v) ?? 0) + 1);
+                }
+                r.fieldStats = {
+                  distinct: counts.size,
+                  truncated: counts.size >= PROFILE_STATS_CAP,
+                  top: [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, PROFILE_TOP_N),
+                };
+              }
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify(r));
+              return;
+            }
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: '只支持 .csv / .tsv / .jsonl / .json 文件的画像' }));
+            return;
+          }
           if (body.op === 'edit') {
             const oldString = String(body.oldString ?? '');
             const newString = String(body.newString ?? '');
@@ -5981,7 +6148,7 @@ if (req.method === 'POST' && !seg0) {
           }
           res.statusCode = 400;
           res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ error: 'op 必须是 list / read / write / edit' }));
+          res.end(JSON.stringify({ error: 'op 必须是 list / read / grep / profile / write / edit' }));
         } catch (e) {
           res.statusCode = 500;
           res.setHeader('Content-Type', 'application/json');
