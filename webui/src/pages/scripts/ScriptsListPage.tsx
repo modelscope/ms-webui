@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { TaskListPage } from '@/components/TaskListPage';
 import { PageAssistant } from '@/components/PageAssistant';
-import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
 import { MODULES } from '@/theme/modules';
 import { mapTaskStatus, type TaskItem } from '@/mock/types';
@@ -36,7 +35,6 @@ export function ScriptsListPage() {
   /* 页面 AI 助手：任务管理工具（列出/停止/重命名），入口在页头 Bot 按钮 */
   const [assistantOpen, setAssistantOpen] = useState(false);
   const { settings } = useSettings();
-  const assistantTools = useMemo(() => moduleTaskTools('script'), []);
 
   const refresh = useCallback(async () => {
     try {
@@ -86,7 +84,7 @@ export function ScriptsListPage() {
         open={assistantOpen}
         onClose={() => setAssistantOpen(false)}
         module={MODULES.scripts.key}
-        tools={assistantTools}
+        toolNames={['task:script']}
         confirmBeforeApply={settings.aiConfirmBeforeApply}
       />
     </>

@@ -665,6 +665,7 @@ export const zh = {
   'chat.deleteChatTitle': '删除这段对话？',
   'chat.deleteChatDesc': '「{title}」的消息将一并清除，不可恢复。',
   'chat.errCompareModels': '先勾选要对比的模型',
+  'chat.errSubmit': '回合提交失败，稍后重试',
   'chat.errPickModel': '先在输入框下方选择模型',
   'chat.noApproval': '无需审批',
   'chat.noApprovalOn': '本会话内所有操作免审批，已生效',

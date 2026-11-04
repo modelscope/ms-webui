@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { TaskDetailShell, Panel, StatCell } from '@/components/TaskDetailShell';
 import { CodeBlock } from '@/components/CodeBlock';
 import { LogViewer } from '@/components/LogViewer';
 import { MODULES } from '@/theme/modules';
 import { PageAssistant } from '@/components/PageAssistant';
-import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
 import { mapTaskStatus, type TaskItem } from '@/mock/types';
 import { getEvalLog, listEvals, renameEval, stopEval, type EvalReportRow, type EvalTaskInfo } from '@/api/eval';
@@ -52,7 +51,6 @@ export function EvalDetailPage({ tab }: { tab: 'result' | 'log' }) {
   /* 页面 AI 助手：任务管理工具（列出/停止/删除/重命名），入口在页头 Bot 按钮 */
   const [assistantOpen, setAssistantOpen] = useState(false);
   const { settings } = useSettings();
-  const assistantTools = useMemo(() => moduleTaskTools('eval'), []);
   const [infos, setInfos] = useState<EvalTaskInfo[]>([]);
   const [log, setLog] = useState<string[]>([]);
 
@@ -181,7 +179,7 @@ export function EvalDetailPage({ tab }: { tab: 'result' | 'log' }) {
         open={assistantOpen}
         onClose={() => setAssistantOpen(false)}
         module={MODULES.eval.key}
-        tools={assistantTools}
+        toolNames={['task:eval']}
         confirmBeforeApply={settings.aiConfirmBeforeApply}
       />
     </>

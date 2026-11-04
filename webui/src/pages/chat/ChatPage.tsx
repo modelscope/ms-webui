@@ -30,15 +30,13 @@ import { MODULES } from '@/theme/modules';
 import { features } from '@/config/features';
 import { deleteChat, pushChat, useChats, type ChatMeta } from '@/store/chats';
 import { pushRecent, removeRecent } from '@/store/recent';
-import { loadTurns, moveTurns, removeTurns, saveTurns } from '@/store/turns';
 import { listModels, listMsModels, type ChatMessage, type ModelConfig, type ToolCall } from '@/api/models';
-import { RESEARCH_GUIDANCE, WEB_SEARCH_SYSTEM, WORKBENCH_GUIDE, envInfoTool, listCatalogTool, readSkillDocTool, readSwiftSourceTool, webSearchTool, workspaceTools } from '@/agent/builtin';
-import { HOME_SYSTEM, homeTools, type CreatedLink } from '@/agent/taskTools';
+import { RESEARCH_GUIDANCE, WEB_SEARCH_SYSTEM, WORKBENCH_GUIDE } from '@/agent/builtin';
+import { HOME_SYSTEM, type CreatedLink } from '@/agent/taskTools';
 import { writePrefill } from '@/store/prefill';
-import { AUTORESEARCH_GUIDE, researchTools } from '@/agent/researchTools';
+import { AUTORESEARCH_GUIDE } from '@/agent/researchTools';
 import {
   RESEARCH_STATUS_LABELS,
-  consumeResearchEvents,
   getResearch,
   listResearch,
   stopResearch,
@@ -47,13 +45,12 @@ import {
 } from '@/api/research';
 import { EVAL_MODE_LABELS, EventLogPanel, IterationsPanel } from '@/pages/research/panels';
 import { tStatic, useT, type MessageKey } from '@/i18n';
-import { runAgentLoop } from '@/agent/runAgentLoop';
-import { compressHistory, moveSummaries, removeSummaries } from '@/agent/history';
-import { composeWakeupMessage } from '@/agent/wakeup';
+import { moveSummaries, removeSummaries } from '@/agent/history';
 import { useApproval } from '@/agent/useApproval';
 import { buildSkillsSystem, listSkills } from '@/api/skills';
 import { fsTool } from '@/api/tools';
 import { resolvePersona } from '@/store/systemPrompts';
+import { submitTurn, openTurnLive, abortTurn, fetchConvBuckets, deleteConv, moveConvBuckets } from '@/api/turns';
 import { useSettings } from '@/settings/SettingsContext';
 
 /**
@@ -874,13 +871,17 @@ export function ChatPage() {
   };
 
   /*
-   * 会话消息：会话 × 模型两维。对比模式的每一列是独立对话（各列各看各的
-   * 上下文），所以消息按 modelId 分桶而不是全图共享一份。持久化经
-   * store/turns 按桶写穿透（见 send 里的 patch）——组件卸载后仍在跑的
-   * 流式循环照常落盘，也不会整图写回覆盖别的桶。
+   * turns 是渲染缓存（真相在 server 的 convs.json）：切会话/刷新时从
+   * convParam effect 的拉回填充，回合增量经 SSE patch——localStorage 不再
+   * 是对话本体的存储。
    */
-  const [turns, setTurns] = useState<Record<string, Record<string, ChatMessage[]>>>(loadTurns);
-  const [streaming, setStreaming] = useState(false);
+  const [turns, setTurns] = useState<Record<string, Record<string, ChatMessage[]>>>({});
+  /*
+   * 在跑回合的列名（SSE 维护）：streaming 是它的派生——回合执行在 server，
+   * 页面刷新后靠 SSE 首连 sync 事件恢复，不再随组件生命期复位。
+   */
+  const [busyList, setBusyList] = useState<string[]>([]);
+  const streaming = busyList.length > 0;
   /*
    * create_* 工具上抛的跳转意图，按「会话 :: 模型列」分桶存。点击按钮时才
    * 落预填并跳转（工具本身不再抢路由——消融场景下用户可能想先继续对话，
@@ -931,40 +932,28 @@ export function ChatPage() {
   }, [convParam]);
 
   /*
-   * headless 拉回（会话激活与页面重新可见共用）：浏览器关闭/休眠期间 server
-   * 可能直写过研究轮次（convs.json 的桶比本地长）。比对后采用 server 版——
-   * 否则一直开着的旧标签页看不到 headless 轮次，还会在下次推送时用旧桶盖掉
-   * 它们（服务端 PUT 守卫兜底，但这里先拉回就无竞态）。切回标签页/电脑唤醒
-   * 后组件不会重新 mount，拉回必须跟着 visibility 重做——否则页面在旧基础
-   * 上续写新回合，与 headless 轮次分叉，守卫按长度二选一时必丢一边。
+   * 桶拉回（会话激活与页面重新可见共用）：server 是唯一真相源，本地短于
+   * server 时采用 server 版（唤醒回合在页面关闭期间写的轮次、SSE 丢帧的
+   * 增量都由此补齐）。切回标签页/电脑唤醒后组件不会重新 mount，拉回必须
+   * 跟着 visibility 重做。
    */
   const pullServerTurns = async (): Promise<void> => {
     if (!convParam) return;
-    try {
-      const res = await fetch('/api/convs');
-      if (!res.ok) return;
-      const srv = (await res.json()) as { turns?: Record<string, Record<string, ChatMessage[]>> };
-      const srvBuckets = srv.turns?.[convParam];
-      if (!srvBuckets) return;
-      setTurns((prev) => {
-        let changed = false;
-        const localBuckets = prev[convParam] ?? {};
-        const merged: Record<string, ChatMessage[]> = { ...localBuckets };
-        for (const [m, msgs] of Object.entries(srvBuckets)) {
-          if (!Array.isArray(msgs)) continue;
-          if (!merged[m] || msgs.length > merged[m].length) {
-            merged[m] = msgs;
-            changed = true;
-            /* 拉回的桶逐个写穿透（读-改-写全量，不动其他桶）并触发镜像推送 */
-            saveTurns(convParam, m, msgs);
-          }
+    const buckets = await fetchConvBuckets(convParam);
+    if (!Object.keys(buckets).length) return;
+    setTurns((prev) => {
+      const cur = prev[convParam] ?? {};
+      let changed = false;
+      const merged = { ...cur };
+      for (const [m, msgs] of Object.entries(buckets)) {
+        if (msgs.length > (cur[m]?.length ?? 0)) {
+          merged[m] = msgs;
+          changed = true;
         }
-        if (!changed) return prev;
-        return { ...prev, [convParam]: merged };
-      });
-    } catch {
-      /* 服务端不可达：本地态照常 */
-    }
+      }
+      if (!changed) return prev;
+      return { ...prev, [convParam]: merged };
+    });
   };
   const pullServerTurnsRef = useRef(pullServerTurns);
   pullServerTurnsRef.current = pullServerTurns;
@@ -1155,15 +1144,18 @@ export function ChatPage() {
    * stopping 标记「已点停止、流还没真正结束」——abort 生效有延迟（正在执行的
    * 工具任其跑完），按钮在这期间转圈，流结束由 effect 复位。
    */
-  const abortRef = useRef<AbortController | null>(null);
   const [stopping, setStopping] = useState(false);
   useEffect(() => {
     if (!streaming) setStopping(false);
   }, [streaming]);
+  /*
+   * 停止键：中止在跑列的页面回合（引擎侧 abort；唤醒回合不受页面控制）。
+   * 连带把未决审批按拒绝结算，卡片不悬空。
+   */
   const stop = () => {
-    if (!abortRef.current) return;
+    if (!streaming || !activeConv) return;
     setStopping(true);
-    abortRef.current.abort();
+    for (const m of busyList) void abortTurn(activeConv, m);
     settleApproval(false);
   };
 
@@ -1193,8 +1185,8 @@ export function ChatPage() {
       return false;
     }
     sending.current = true;
-    const abort = new AbortController();
-    abortRef.current = abort;
+    /* 目标列含 MS 登录默认模型时带会话 token（引擎代理侧鉴权与页面同规则） */
+    const apiKey = targets.some((x) => msModelIds.has(x)) ? token : undefined;
     /* 无会话（hero 首发 / 刚点「新对话」）时建档，标题取首句；续聊只刷新时间 */
     const conv = activeConv || `c${Date.now().toString(36)}`;
     if (!activeConv) setActiveConv(conv);
@@ -1210,7 +1202,6 @@ export function ChatPage() {
       setDraft('');
       setAttachments([]);
     }
-    setStreaming(true);
     /*
      * 会话入侧栏「最近」：以会话为去重键，续聊只上浮不占新位。path 带 conv
      * 参数——点击直达这段对话（本页监听 ?conv= 切换会话），不再是无效的同路由跳转。
@@ -1227,55 +1218,16 @@ export function ChatPage() {
       ...(!preset && attachments.length ? { images: [...attachments] } : {}),
     };
     /*
-     * 列消息的内存镜像 + 写穿透持久化：render 走 setTurns，落盘走 saveTurns
-     * （按桶读改写）。为什么镜像而不是 setTurns(prev => …)：流式期间用户可能
-     * 自己切路由（create_* 已改成按钮跳转，但用户点按钮/点侧栏同样会卸载本
-     * 组件），updater 形态的更新在卸载后整体失效，对话尾部（工具结果与最终
-     * 回复）会静默丢失；闭包镜像 + 直接落盘让循环写穿到存储，与组件生命
-     * 周期解耦。
+     * 单写者架构：页面只提交回合与本地上屏 user 消息——执行体（压缩历史、
+     * 模型流、工具循环、落盘）在 server 回合引擎，刷新/关闭页面不影响回合
+     * 跑完；增量经 SSE 订阅进视图（见下方订阅 effect），引擎落盘的消息是
+     * 唯一真相，页面 state 只是渲染缓存。
      */
-    const msgsByModel = new Map<string, ChatMessage[]>();
-    const syncColumn = (modelId: string, msgs: ChatMessage[]) => {
-      msgsByModel.set(modelId, msgs);
-      saveTurns(conv, modelId, msgs);
-      setTurns((prev) => ({ ...prev, [conv]: { ...(prev[conv] ?? {}), [modelId]: msgs } }));
-    };
-    /*
-     * 回合开工前拉回 server 桶（仅续聊会话）：页面关闭/后台期间 headless 可能
-     * 续写过轮次（研究续轮、中断恢复），而下面用的 turns 是 render 时的闭包
-     * 快照——基于旧历史跑回合会与 server 分叉，PUT 二选一必丢一边。拉回采用
-     * 更长的 server 桶并写穿透（不阻塞太久：本机请求，失败静默走本地态）。
-     */
-    let baseTurns = turns[conv] ?? {};
-    if (activeConv) {
-      try {
-        const r = await fetch('/api/convs');
-        if (r.ok) {
-          const srv = (await r.json()) as { turns?: Record<string, Record<string, ChatMessage[]>> };
-          const sb = srv.turns?.[conv];
-          if (sb) {
-            let changed = false;
-            const merged: Record<string, ChatMessage[]> = { ...baseTurns };
-            for (const [m, msgs] of Object.entries(sb)) {
-              if (Array.isArray(msgs) && msgs.length > (baseTurns[m]?.length ?? 0)) {
-                merged[m] = msgs;
-                changed = true;
-                saveTurns(conv, m, msgs);
-              }
-            }
-            if (changed) {
-              baseTurns = merged;
-              setTurns((prev) => ({ ...prev, [conv]: { ...(prev[conv] ?? {}), ...merged } }));
-            }
-          }
-        }
-      } catch {
-        /* 拉不回（服务暂不可达）：本地态照常开工 */
-      }
-    }
-    for (const x of targets) {
-      syncColumn(x, [...(baseTurns[x] ?? []), userMsg]);
-    }
+    setTurns((prev) => {
+      const buckets = { ...(prev[conv] ?? {}) };
+      for (const x of targets) buckets[x] = [...(buckets[x] ?? []), userMsg];
+      return { ...prev, [conv]: buckets };
+    });
 
     /*
      * 基础 system 从全局设置的提示词库解出（机器侧持久、改完即生效）：默认
@@ -1304,244 +1256,188 @@ export function ChatPage() {
       }
     }
 
+    /*
+     * system 块与工具名清单交给引擎组装执行（引擎按名构建工具，工具执行体
+     * 经 apiBase() 自调用本机 HTTP，与浏览器同一执行面）。工具名注册表见
+     * server/turnEngine.ts 的 buildTools。
+     */
+    const systemBlocks = [
+      ...(persona ? [persona] : []),
+      ...(web ? [WEB_SEARCH_SYSTEM] : []),
+      ...(code ? [RESEARCH_GUIDANCE] : []),
+      /* autoresearch 指引：研究模式（访谈阶段）或会话已绑定研究会话（循环阶段）时常驻 */
+      ...((code || research) ? [AUTORESEARCH_GUIDE] : []),
+      ...(lessonsSystem ? [lessonsSystem] : []),
+      HOME_SYSTEM,
+      /* 工作台行动指引：swift 用法/数据集入口/模型选型/算力分片的正确路标 */
+      WORKBENCH_GUIDE,
+      /* 技能文档随首页常驻注入（与任务工具同定位：工作台的固有上下文） */
+      ...(skillsSystem ? [skillsSystem] : []),
+    ];
+    const toolNames = [
+      'read_skill',
+      'list_catalog',
+      'env_info',
+      'read_swift_source',
+      /* 研究会话绑定的对话挂 workspace 工具：循环里的数据准备（自写预处理
+       * 脚本、跑 Challenger 组件、继承改写）靠 write_file/run_script，不能
+       * 依赖用户记得开「研究」胶囊——事件唤醒时胶囊可能关着。 */
+      ...((code || research) ? ['workspace', 'research'] : []),
+      ...(web ? ['web'] : []),
+      'home',
+    ];
+
+    sending.current = true;
     try {
-      await Promise.all(
-        targets.map(async (modelId) => {
-          const apiKey = msModelIds.has(modelId) ? token : undefined;
-          /*
-           * 对话本体先过压缩：token 估算超阈值时，旧消息折成一条摘要 system
-           * 消息 + 保留最近几轮原文（rolling summary，摘要结果单独持久化、
-           * 跨轮复用）。失败或未超阈值原样返回。渲染与 turns 持久化仍是
-           * 全量原文——压缩只影响发出去的请求体。
-           */
-          const dialogue = await compressHistory({
-            convId: conv,
-            modelId,
-            dialogue: msgsByModel.get(modelId) ?? [],
-            ...(apiKey ? { apiKey } : {}),
-          });
-          const history: ChatMessage[] = [
-            ...(persona ? [{ role: 'system' as const, content: persona }] : []),
-            ...(web ? [{ role: 'system' as const, content: WEB_SEARCH_SYSTEM }] : []),
-            ...(code ? [{ role: 'system' as const, content: RESEARCH_GUIDANCE }] : []),
-            /* autoresearch 指引：研究模式（访谈阶段）或会话已绑定研究会话（循环阶段）时常驻 */
-            ...(code || research ? [{ role: 'system' as const, content: AUTORESEARCH_GUIDE }] : []),
-            /* 踩坑教训文件头部（同上常驻；内容为空时不注入） */
-            ...(lessonsSystem ? [{ role: 'system' as const, content: lessonsSystem }] : []),
-            { role: 'system' as const, content: HOME_SYSTEM },
-            /* 工作台行动指引：swift 用法/数据集入口/模型选型/算力分片的正确路标 */
-            { role: 'system' as const, content: WORKBENCH_GUIDE },
-            /* 技能文档随首页常驻注入（与任务工具同定位：工作台的固有上下文） */
-            ...(skillsSystem ? [{ role: 'system' as const, content: skillsSystem }] : []),
-            ...dialogue,
-          ];
-          const patch = (fn: (msgs: ChatMessage[]) => ChatMessage[]) =>
-            syncColumn(modelId, fn(msgsByModel.get(modelId) ?? []));
-          /*
-           * 工具集按胶囊组合：「研究」给文件/shell 四件套、「联网搜索」给检索工具；
-           * 任务工具（创建/列出/停止）常驻——首页的定位就是工作台入口，不随胶囊
-           * 开关。read_skill / list_catalog / env_info 与 skills 注入、行动指引
-           * 同定位（常驻）：文档要够得着、数据集有入口、环境事实不用 shell 试探。
-           * homeTools 每列各建一份：预填上下文要带上本列模型，目标页助手续聊
-           * 时才知道加载哪个桶。
-           * 研究会话绑定的对话也挂 workspace 工具：循环里的数据准备（自写预处理
-           * 脚本、跑 Challenger 组件、继承改写）靠 write_file/run_script，不能
-           * 依赖用户记得开「研究」胶囊——事件唤醒时胶囊可能关着。
-           */
-          const tools = [
-            readSkillDocTool(),
-            listCatalogTool(),
-            envInfoTool(),
-            readSwiftSourceTool(),
-            ...((code || research) ? workspaceTools(conv, modelId) : []),
-            /* autoresearch 工具与指引同定位：访谈要它、事件唤醒后的循环决策更要它 */
-            ...((code || research) ? researchTools(conv, modelId) : []),
-            ...(web ? [webSearchTool()] : []),
-            ...homeTools({
-              userRequest: text,
-              /* 创建意图上抛：不跳转，渲染成回复区的「前往查看」按钮 */
-              onCreate: (link) =>
-                setPendingLinks((prev) => ({
-                  ...prev,
-                  [`${conv}::${modelId}`]: [...(prev[`${conv}::${modelId}`] ?? []), link],
-                })),
-              conv,
-              model: modelId,
-            }),
-          ];
-          /*
-           * agent 循环（统一层）：模型发起调用就执行、结果回喂再续一轮，直到
-           * 不再调用或撞轮次上限；无工具模式首轮即终轮。turns 的落库通过
-           * events 回调同步——渲染与持久化同一条流。
-           */
-          await runAgentLoop({
-            model: modelId,
-            history,
-            tools,
-            ctx: { requestApproval: approveOrBypass, allowedCommands: allowedCommands.current },
-            sampling: { temperature, topP, maxTokens },
-            /* 登录后的默认模型随请求带会话 token；其余模型不带头（服务端查 models.json） */
-            ...(apiKey ? { apiKey } : {}),
-            signal: abort.signal,
-            /* 页面回合标记：模型思考中途关页面时，中间件据此登记断口并触发续轮 */
-            convId: conv,
-            events: {
-              onAssistantStart: () => patch((msgs) => [...msgs, { role: 'assistant', content: '' }]),
-              onDelta: (parts) =>
-                patch((msgs) => {
-                  const last = msgs[msgs.length - 1];
-                  return [
-                    ...msgs.slice(0, -1),
-                    {
-                      role: 'assistant' as const,
-                      content: last.content + parts.content,
-                      reasoning: (last.reasoning ?? '') + parts.reasoning,
-                      toolCalls: parts.toolCalls?.length
-                        ? [...(last.toolCalls ?? []), ...parts.toolCalls]
-                        : last.toolCalls,
-                    },
-                  ];
-                }),
-              onToolResult: (call, result) =>
-                patch((msgs) => [...msgs, { role: 'tool', content: result, toolCallId: call.id }]),
-              onError: (text) =>
-                patch((msgs) => [
-                  ...msgs.slice(0, -1),
-                  { role: 'assistant', content: msgs[msgs.length - 1].content || text },
-                ]),
-              /* 非致命提示（截断等）：追加到末尾消息尾部，不覆盖已收内容 */
-              onNotice: (text) =>
-                patch((msgs) => {
-                  const last = msgs[msgs.length - 1];
-                  if (!last || last.role !== 'assistant' || !last.content) return msgs;
-                  return [...msgs.slice(0, -1), { ...last, content: `${last.content}\n\n${text}` }];
-                }),
-            },
-          });
-          /* 被停止的流：末条 assistant 正文补一个停止标记（工具结果结尾就不加） */
-          if (abort.signal.aborted) {
-            patch((msgs) => {
-              const last = msgs[msgs.length - 1];
-              if (!last || last.role !== 'assistant' || !last.content) return msgs;
-              return [...msgs.slice(0, -1), { ...last, content: `${last.content}\n\n${t('assistant.stopped')}` }];
-            });
-          }
-        }),
-      );
+      const r = await submitTurn(conv, {
+        text,
+        models: targets,
+        ...(!preset && attachments.length ? { images: [...attachments] } : {}),
+        system: systemBlocks,
+        tools: toolNames,
+        /* 新会话把标题交给引擎建档（server 侧 chats 注册表与本机 pushChat 同步） */
+        ...(activeConv ? {} : { title }),
+        ...(apiKey ? { apiKey } : {}),
+        sampling: { temperature, topP, maxTokens },
+      });
+      if ('error' in r) {
+        toast.error(t('chat.errSubmit'));
+        return false;
+      }
+      /* 乐观置忙（SSE 的 turn-done 负责清除；刷新后 sync 事件恢复） */
+      setBusyList((prev) => [...new Set([...prev, ...targets])]);
       /*
-       * 本轮流结束补一次绑定发现：create_research 在往返内落盘，这里刷新
-       * 才能让事件轮询立即接上（否则要等下次会话切换）。返回 true = 消息
-       * 确已发出（唤醒侧据此清 pending）。
+       * 本轮提交后补一次绑定发现：create_research 在往返内落盘，这里刷新
+       * 才能让事件唤醒立即接上（否则要等下次会话切换）。返回 true = 消息
+       * 确已发出。
        */
       refreshResearchBinding(conv);
       return true;
     } finally {
       sending.current = false;
-      setStreaming(false);
-      if (abortRef.current === abort) abortRef.current = null;
     }
   };
 
   /*
-   * autoresearch 唤醒轮询：会话绑定了研究会话就 2s 一拍。先 peek（GET :id
-   * 带 events）看到有事件才 consume——取走即删，流式进行中不动队列；事件
-   * 拼成合成 user 消息自动触发 send（目标列 = 会话绑定的研究模型，审批照
-   * 常弹，用户不在就停在审批卡）。取走与发出之间用户恰好发消息的竞态由
-   * pending 兠住：send 没接（false）就留在 pending 下一拍重试，事件不丢。
-   * sendRef 每渲染同步最新闭包（send 读的 streaming/turns 都是当渲染的 state）。
+   * 回合增量订阅（SSE）：单写者架构的观看面。事件直接 patch turns state
+   * （渲染缓存）；引擎落盘的消息是唯一真相，turn-done 时拉单会话桶对账
+   * 兜底（SSE 丢帧/刷新重连后以此补齐）。busyList 同源维护——页面刷新后
+   * 首连 sync 事件恢复按钮态。事件唤醒（研究/脚本）的回合由 server 的
+   * turnTick 消费起跑，页面在这里实时看到合成消息与续轮增量。
    */
-  const pendingWakeup = useRef<string | null>(null);
-  const sendRef = useRef(send);
   useEffect(() => {
-    sendRef.current = send;
-  });
-  useEffect(() => {
-    const id = research?.id;
-    const modelId = research?.modelId ?? '';
-    if (!id) return;
-    /*
-     * 投递至多一次：send 抛异常（上游断流等）时合成消息已在列里，重试只会
-     * 每 2 秒重复一条相同消息无限刷屏——事件弃置并显式报错，唤醒丢失是
-     * 本通道已接受的取舍（内存队列、服务重启即清零）。
-     */
-    const flush = async (text: string) => {
-      try {
-        const ok = await sendRef.current({ text, ...(modelId ? { modelId } : {}) });
-        if (ok) pendingWakeup.current = null;
-      } catch {
-        pendingWakeup.current = null;
-        toast.error(tStatic('chat.wakeDrop'));
-      }
+    if (!convParam) {
+      setBusyList([]);
+      return;
+    }
+    const conv = convParam;
+    const patchColumn = (model: string, fn: (msgs: ChatMessage[]) => ChatMessage[]): void => {
+      setTurns((prev) => {
+        const bucket = prev[conv]?.[model] ?? [];
+        return { ...prev, [conv]: { ...(prev[conv] ?? {}), [model]: fn(bucket) } };
+      });
     };
-    const tick = async () => {
-      try {
-        if (pendingWakeup.current) {
-          await flush(pendingWakeup.current);
+    const close = openTurnLive(conv, (ev) => {
+      if (ev.conv !== conv) return;
+      switch (ev.type) {
+        case 'sync':
+          setBusyList(ev.models ?? []);
+          return;
+        case 'turn-start':
+          setBusyList((prev) => (prev.includes(ev.model) ? prev : [...prev, ev.model]));
+          return;
+        case 'user': {
+          /* 唤醒回合的合成消息：页面本地未 append 过才补（角色+内容去重） */
+          const incoming = ev.message;
+          if (!incoming) return;
+          setTurns((prev) => {
+            const bucket = prev[conv]?.[ev.model] ?? [];
+            const last = bucket[bucket.length - 1];
+            if (last?.role === 'user' && last.content === incoming.content) return prev;
+            return { ...prev, [conv]: { ...(prev[conv] ?? {}), [ev.model]: [...bucket, incoming] } };
+          });
           return;
         }
-        /* peek：完整会话（含 events）。顺带刷状态（研究徽标），仅在变化时 setState */
+        case 'assistant-start':
+          patchColumn(ev.model, (msgs) => [...msgs, { role: 'assistant', content: '' }]);
+          return;
+        case 'delta':
+          patchColumn(ev.model, (msgs) => {
+            const last = msgs[msgs.length - 1];
+            if (!last || last.role !== 'assistant') return msgs; /* 乱序保护 */
+            return [
+              ...msgs.slice(0, -1),
+              {
+                role: 'assistant' as const,
+                content: last.content + (ev.content ?? ''),
+                reasoning: (last.reasoning ?? '') + (ev.reasoning ?? ''),
+                toolCalls: ev.toolCalls?.length ? [...(last.toolCalls ?? []), ...ev.toolCalls] : last.toolCalls,
+              },
+            ];
+          });
+          return;
+        case 'assistant':
+        case 'tool':
+        case 'error': {
+          /* 引擎落盘的完整消息：尾部对齐（delta 已拼则等价替换，丢帧则补齐） */
+          if (!ev.message) return;
+          const incoming = ev.message;
+          patchColumn(ev.model, (msgs) => {
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === 'assistant' && incoming.role === 'assistant') {
+              return [...msgs.slice(0, -1), incoming];
+            }
+            return [...msgs, incoming];
+          });
+          return;
+        }
+        case 'turn-done': {
+          setBusyList((prev) => prev.filter((m) => m !== ev.model));
+          /* 对账兜底：单会话桶轻量拉回，页面短于 server 时采用 server 版 */
+          void fetchConvBuckets(conv).then((buckets) => {
+            setTurns((prev) => {
+              const cur = prev[conv] ?? {};
+              let changed = false;
+              const merged = { ...cur };
+              for (const [m, msgs] of Object.entries(buckets)) {
+                if (msgs.length > (cur[m]?.length ?? 0)) {
+                  merged[m] = msgs;
+                  changed = true;
+                }
+              }
+              return changed ? { ...prev, [conv]: merged } : prev;
+            });
+          });
+          return;
+        }
+      }
+    });
+    return close;
+  }, [convParam]);
+
+  /*
+   * 研究状态轻量轮询（原事件泵剥离后仅剩状态面）：会话绑定的研究会话
+   * status 变化（deciding→training 等）进徽标；事件唤醒与续轮由 server 的
+   * turnTick 起跑、增量走上面的 SSE 订阅，这里只刷状态。
+   */
+  useEffect(() => {
+    const id = research?.id;
+    if (!id) return;
+    const tick = async () => {
+      try {
         const s = await getResearch(id);
         setResearch((prev) => {
           if (!prev || prev.id !== id || prev.status === s.status) return prev;
           const { events: _pending, ...summary } = s;
           return summary;
         });
-        if (!s.events.length) return;
-        const events = await consumeResearchEvents(id);
-        if (!events.length) return;
-        pendingWakeup.current = composeWakeupMessage(s, events);
-        await flush(pendingWakeup.current);
       } catch {
-        /* 研究面暂不可用：事件留在服务端队列，下一拍重试 */
+        /* 研究面暂不可用：保留上一帧 */
       }
     };
     const timer = setInterval(() => void tick(), 2000);
     return () => clearInterval(timer);
   }, [research?.id]);
-
-  /*
-   * 脚本唤醒轮询：本会话经 run_script 启动的后台脚本到达终态（done/failed）
-   * 时，中间件把事件推入会话队列；这里 2s 一拍取走（take=1 消费即删），拼成
-   * 合成消息自动触发 send（目标列 = 启动脚本的那列，由事件带回）。与研究
-   * 唤醒同构：取走与发出之间流式进行中的竞态由 pending 兜住重试，事件文本
-   * 已在手上不丢。脚本唤醒不依赖研究胶囊——run_script 挂在代码模式下，
-   * 模型回合在脚本运行中自然结束，完成事件把它拉回来继续决策。
-   */
-  const pendingScriptWakeup = useRef<{ text: string; modelId?: string } | null>(null);
-  useEffect(() => {
-    if (!activeConv) return;
-    const flush = async () => {
-      const pending = pendingScriptWakeup.current;
-      if (!pending) return;
-      /* 同研究泵：send 抛异常时事件弃置（合成消息已入列，重试只会重复刷屏） */
-      try {
-        const ok = await sendRef.current({ text: pending.text, ...(pending.modelId ? { modelId: pending.modelId } : {}) });
-        if (ok) pendingScriptWakeup.current = null;
-      } catch {
-        pendingScriptWakeup.current = null;
-        toast.error(tStatic('chat.wakeDrop'));
-      }
-    };
-    const tick = async () => {
-      try {
-        await flush();
-        if (pendingScriptWakeup.current) return;
-        const res = await fetch(`/api/conv-events?conv=${encodeURIComponent(activeConv)}&take=1`);
-        if (!res.ok) return;
-        const { events } = (await res.json()) as { events: { text: string; modelId?: string }[] };
-        if (!events.length) return;
-        pendingScriptWakeup.current = {
-          text: events.map((e) => `[脚本事件] ${e.text}`).join('\n\n'),
-          modelId: events[0].modelId,
-        };
-        await flush();
-      } catch {
-        /* 事件面暂不可用：已取走的由 pending 兑住，未取走的下一拍重试 */
-      }
-    };
-    const timer = setInterval(() => void tick(), 2000);
-    return () => clearInterval(timer);
-  }, [activeConv]);
 
   /*
    * 后台脚本存在性提示：模型回合随脚本转入后台而自然结束（发送按钮恢复），
@@ -1662,7 +1558,7 @@ export function ChatPage() {
       return;
     }
     if (started && activeConv) {
-      moveTurns(activeConv, single, v);
+      void moveConvBuckets(activeConv, single, v);
       moveSummaries(activeConv, single, v);
       setTurns((prev) => {
         const buckets = { ...(prev[activeConv] ?? {}) };
@@ -1725,7 +1621,7 @@ export function ChatPage() {
   const removeChat = (id: string) => {
     deleteChat(id);
     removeRecent(`chat:${id}`);
-    removeTurns(id);
+    void deleteConv(id);
     removeSummaries(id);
     setTurns((prev) => {
       const next = { ...prev };

@@ -8,11 +8,9 @@ import { SettingsProvider } from '@/settings/SettingsContext';
 import { LocaleProvider } from '@/i18n';
 import { TokenIntroDialog } from '@/components/TokenIntroDialog';
 import { TourDialog } from '@/components/TourDialog';
-import { initConvSync } from '@/store/convsSync';
 import './index.css';
 
 /* 对话历史服务端镜像：boot 拉一次（补缺）+ 后续写穿透（防抖推送） */
-void initConvSync();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

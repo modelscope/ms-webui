@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { TaskListPage } from '@/components/TaskListPage';
 import { MODULES } from '@/theme/modules';
 import { PageAssistant } from '@/components/PageAssistant';
-import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
 import { mapTaskStatus, type TaskItem } from '@/mock/types';
 import { listTrains, renameTrain, stopTrain, trainTaskLabel, type TrainTaskInfo } from '@/api/train';
@@ -35,7 +34,6 @@ export function TrainListPage() {
   /* 页面 AI 助手：任务管理工具（列出/停止/删除/重命名），入口在页头 Bot 按钮 */
   const [assistantOpen, setAssistantOpen] = useState(false);
   const { settings } = useSettings();
-  const assistantTools = useMemo(() => moduleTaskTools('train'), []);
 
   const refresh = useCallback(async () => {
     try {
@@ -78,7 +76,7 @@ export function TrainListPage() {
         open={assistantOpen}
         onClose={() => setAssistantOpen(false)}
         module={MODULES.train.key}
-        tools={assistantTools}
+        toolNames={['task:train']}
         confirmBeforeApply={settings.aiConfirmBeforeApply}
       />
     </>

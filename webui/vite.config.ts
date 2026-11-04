@@ -11,7 +11,8 @@ import { createInterface } from 'node:readline';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { createHeadlessRunner, type HeadlessHandle } from './server/headless';
+import { createTurnEngine, type TurnEngineHandle } from './server/turnEngine';
+import { composeWakeupMessage, composeScriptWakeupMessage } from './src/agent/wakeup';
 import type { ChatMessage } from './src/api/models';
 
 /**
@@ -2433,7 +2434,7 @@ function pushResearchEvent(id: string, kind: string, text: string): Promise<void
   }).then(() => undefined);
 }
 
-/** 取走研究会话积压事件（消费即删）：对话页泵与 headless runner 共用同一语义 */
+/** 取走研究会话积压事件（消费即删）：唯一消费方是 turnTimer（起引擎唤醒回合） */
 async function takeResearchEvents(id: string): Promise<ResearchSession['events']> {
   let taken: ResearchSession['events'] = [];
   await mutateResearch(id, (x) => {
@@ -2443,7 +2444,7 @@ async function takeResearchEvents(id: string): Promise<ResearchSession['events']
   return taken;
 }
 
-/** 取走该对话积压的脚本事件（消费即删 + 落盘同步）：对话页泵与 headless 共用 */
+/** 取走该对话积压的脚本事件（消费即删 + 落盘同步）：唯一消费方是 turnTimer */
 function takeConvEvents(conv: string): { text: string; modelId?: string }[] {
   const events = convEvents.get(conv) ?? [];
   convEvents.delete(conv);
@@ -2452,15 +2453,10 @@ function takeConvEvents(conv: string): { text: string; modelId?: string }[] {
 }
 
 /*
- * headless runner 句柄（configureServer 里创建）：模块级变量让中间件
- * （conv-events 心跳、审批 API、convs PUT 守卫）与 watcher 能引用。
+ * 回合引擎句柄（configureServer 里创建）：模块级变量让中间件（回合提交、
+ * SSE 订阅、审批 API）与 watcher（stall 在飞判定）能引用。
  */
-let headless: HeadlessHandle | null = null;
-
-/** 对话页泵到达即刷新心跳（headless 据此判定浏览器在场、让位） */
-function touchConvHeartbeat(conv: string): void {
-  headless?.touchHeartbeat(conv);
-}
+let engine: TurnEngineHandle | null = null;
 
 /** 列表不带 events / eventLog（事件单独取，负载体积） */
 function publicResearchSession(s: ResearchSession) {
@@ -2593,8 +2589,8 @@ async function watchResearchStall(session: ResearchSession): Promise<void> {
     }) ||
     /* 该会话的对话还有后台脚本在跑 */
     [...scriptTasks.values()].some((s) => s.conv === session.convId && s.status === 'running') ||
-    /* headless 回合在飞（含审批挂起）：事件已消费、模型正在决策或等人 */
-    (session.convId ? headless?.headlessBusy(session.convId) : false) === true;
+    /* 引擎回合在飞（含审批挂起）：事件已消费、模型正在决策或等人 */
+    (session.convId ? engine?.busyConv(session.convId) : false) === true;
   if (busy) {
     if (session.stallSince) await mutateResearch(session.id, (s) => { s.stallSince = undefined; });
     return;
@@ -3302,15 +3298,13 @@ function swiftApiPlugin(): Plugin {
       /* 单实例锁先于一切：单写者文件面不允许双 webui 互踩 */
       acquireWebuiLock(server);
       /*
-       * headless 研究驱动器：浏览器关闭后接管「事件 → 模型续轮」。工具执行体
-       * 经 apiBase() 自调用本机 HTTP（端口注入 globalThis），与浏览器同一执行面。
+       * 回合引擎（单写者）：对话回合的执行体——页面提交与事件唤醒都由它跑，
+       * convs.json 的 turns 桶只有它写。工具执行体经 apiBase() 自调用本机
+       * HTTP（端口注入 globalThis），与浏览器同一执行面。
        */
       const port = server.config.server.port;
       (globalThis as { __WEBUI_PORT__?: number }).__WEBUI_PORT__ = typeof port === 'number' ? port : 5180;
-      headless = createHeadlessRunner({
-        loadResearch,
-        consumeResearchEvents: takeResearchEvents,
-        consumeConvEvents: takeConvEvents,
+      engine = createTurnEngine({
         readTurns: (conv, model) => {
           const c = readConvs();
           if (c === null) return null;
@@ -3323,6 +3317,19 @@ function swiftApiPlugin(): Plugin {
           const buckets = { ...(c.turns[conv] ?? {}) } as Record<string, unknown[]>;
           buckets[model] = [...(buckets[model] ?? []), msg as unknown];
           writeConvs(c.chats, { ...c.turns, [conv]: buckets });
+        },
+        upsertChat: (conv, title) => {
+          const c = readConvs();
+          if (c === null) return; /* 坏文件不建档：回合照跑，元数据下次补 */
+          const chats = [...c.chats] as Array<{ id?: unknown; title?: unknown; updatedAt?: unknown }>;
+          const hit = chats.find((x) => x?.id === conv);
+          if (hit) {
+            hit.updatedAt = Date.now();
+            if (title) hit.title = title;
+          } else {
+            chats.push({ id: conv, ...(title ? { title } : {}), updatedAt: Date.now() });
+          }
+          writeConvs(chats, c.turns);
         },
         loadModel: (modelId) => loadModels().find((m) => m.id === modelId),
         chatDefaults: () => (loadWebuiSettings() as { chatDefaults?: { temperature?: number; topP?: number; maxTokens?: number } }).chatDefaults ?? {},
@@ -3357,37 +3364,52 @@ function swiftApiPlugin(): Plugin {
       const trainAdoptTimer = setInterval(() => adoptTrainTick(), 5000);
       server.httpServer?.on('close', () => clearInterval(trainAdoptTimer));
       /*
-       * 页面回合断口登记（conv → 客户端断开时刻）：页面回合的模型流被掐
-       * （模型思考中途关页面/断网）时由 chat 中间件写入，headlessTimer 的
-       * 中断恢复检查消费。页面在线期间的回合没有 server 侧执行体——这是
-       * 「浏览器可关」语义在模型决策半环上的最后一个缺口。
+       * 事件唤醒 tick：5s 一拍消费积压事件（研究事件 + 脚本事件）并交给回合
+       * 引擎续轮。回合执行全在 server，不再有「浏览器在场让位」的分支——
+       * 浏览器关闭/刷新只影响观看（SSE），不影响执行。MS 登录 token 模型
+       * 例外：models.json 无 key 无法无头跑，事件留队等浏览器提交回合。
        */
-      const pageTurnAborts = new Map<string, number>();
-      /* headless 驱动同拍：寻找可接管的研究会话（浏览器离线 + 有积压事件） */
-      const headlessTimer = setInterval(() => {
-        /*
-         * 中断回合恢复：断口满 10s 宽限后仍无该会话心跳 = 页面真的关了
-         * （用户主动停止则页面在、心跳在，不自动续以免违背停止意图）→ 给
-         * 绑定的非终态研究会话推一条续轮事件：页面回来的泵消费、页面不在
-         * 由下方 headlessTick 下一拍接管。
-         */
-        for (const [conv, at] of pageTurnAborts) {
-          if (Date.now() - at < 10_000) continue;
-          pageTurnAborts.delete(conv);
-          if (headless?.isConvOnline(conv)) continue;
-          const session = loadResearch().find(
-            (s) => s.convId === conv && s.status !== 'done' && s.status !== 'escalated' && s.status !== 'stopped',
-          );
-          if (!session) continue;
-          void pushResearchEvent(
-            session.id,
-            'turn-broken',
-            '上一回合被中断（页面在模型思考中途关闭，流断在半途）：先读对话尾部确认断点与已收到的部分输出，然后从中断处继续推进本回合该做的事。',
-          );
-        }
-        headless?.headlessTick();
+      const turnTimer = setInterval(() => {
+        void (async () => {
+          if (!engine) return;
+          const handledConvs = new Set<string>();
+          for (const session of loadResearch()) {
+            if (!session.convId || !session.modelId) continue;
+            if (!session.events?.length && !convEvents.get(session.convId)?.length) continue;
+            if (engine.busyConv(session.convId)) continue;
+            const m = loadModels().find((x) => x.id === session.modelId);
+            if (!m?.baseUrl || !m?.apiKey) continue; /* MS token 模型：事件留队 */
+            const researchEvents = session.events?.length ? await takeResearchEvents(session.id) : [];
+            const scriptEvents = takeConvEvents(session.convId);
+            if (!researchEvents.length && !scriptEvents.length) continue;
+            const text = [
+              ...(researchEvents.length ? [composeWakeupMessage(session, researchEvents)] : []),
+              ...(scriptEvents.length ? [composeScriptWakeupMessage(scriptEvents)] : []),
+            ].join('\n\n');
+            console.log(`[turn] 唤醒 ${session.id}（${researchEvents.length} 研究事件 + ${scriptEvents.length} 脚本事件）`);
+            handledConvs.add(session.convId);
+            engine.runWakeupTurn(session.convId, session.modelId, text);
+          }
+          /*
+           * 非研究会话的积压脚本事件（普通对话里模型自己跑的后台脚本完成）：
+           * 事件带 modelId 才能定位唤醒哪一列；无 modelId 的旧事件留队。
+           */
+          for (const conv of [...convEvents.keys()]) {
+            if (handledConvs.has(conv)) continue; /* 研究循环已合并消费 */
+            const queue = convEvents.get(conv) ?? [];
+            const model = queue.find((e) => e.modelId)?.modelId;
+            if (!model) continue;
+            if (engine.busy(conv, model)) continue;
+            const m = loadModels().find((x) => x.id === model);
+            if (!m?.baseUrl || !m?.apiKey) continue;
+            const scriptEvents = takeConvEvents(conv);
+            if (!scriptEvents.length) continue;
+            console.log(`[turn] 唤醒 ${conv}（${scriptEvents.length} 脚本事件）`);
+            engine.runWakeupTurn(conv, model, composeScriptWakeupMessage(scriptEvents));
+          }
+        })();
       }, 5000);
-      server.httpServer?.on('close', () => clearInterval(headlessTimer));
+      server.httpServer?.on('close', () => clearInterval(turnTimer));
       /*
        * 排障判别器（最前置）：所有进入的 /api 请求都留一行——请求只要到达
        * 容器必然被记录，用于裁决「报错发生但服务端无痕迹」类故障属于
@@ -5719,37 +5741,12 @@ if (req.method === 'POST' && !seg0) {
        * 只服务于脚本唤醒——研究事件走 /api/research/:id/events 的 peek+consume
        * 两步式；这里取走后由前端 pending 兑住发不出去的竞态，事件不丢。
        */
-      server.middlewares.use('/api/conv-events', (req, res) => {
-        try {
-          const url = new URL(req.url ?? '/', 'http://local');
-          const conv = url.searchParams.get('conv') ?? '';
-          if (req.method === 'GET' && conv && url.searchParams.get('take') === '1') {
-            /* 挂心跳：任何打开的对话页都在打这个泵（2s 一拍），headless 据此判定让位 */
-            touchConvHeartbeat(conv);
-            const events = takeConvEvents(conv);
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ events }));
-            return;
-          }
-          res.statusCode = 400;
-          res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ error: 'GET /api/conv-events?conv=<会话id>&take=1' }));
-        } catch (e) {
-          res.statusCode = 500;
-          res.end(JSON.stringify({ error: String(e) }));
-        }
-      });
-
       /*
-       * 对话历史的服务端备份（convs.json）：浏览器 localStorage 仍是主存储，
-       * 这里做同栈镜像——换设备/换实例/清缓存后可拉回。PUT 全量覆盖（删除
-       * 随下一次推送自然传播）。展览模式禁用：机器侧文件是共享面，多用户
-       * 的对话不允许混进同一份 convs.json。
-       * PUT 守卫：headless 写过且尚未被浏览器拉回的桶（dirty），若浏览器推来
-       * 的版本更短则保住 server 版——否则旧 localStorage 的一次防抖推送会把
-       * headless 轮次静默盖掉。
+       * 对话历史（convs.json）：server 是唯一真相源（回合引擎是唯一写者），
+       * 浏览器只读——GET 拉全量做首屏渲染与重连对账。展览模式禁用：机器侧
+       * 文件是共享面，多用户的对话不允许混进同一份 convs.json。
        */
-      server.middlewares.use('/api/convs', async (req, res) => {
+      server.middlewares.use('/api/convs', (req, res) => {
         try {
           if (launchMode() === 'expo') {
             res.statusCode = 403;
@@ -5758,35 +5755,9 @@ if (req.method === 'POST' && !seg0) {
             return;
           }
           if (req.method === 'GET') {
-            /* 拉回打卡（响应完整送达后）：PUT 守卫放行的第二道门——浏览器看过
-             * server 现状才放行它覆盖 dirty 桶。打卡在 finish 而非受理时刻，
-             * 因为 PUT 推的 localStorage 在响应到达并 merge 之前仍是旧桶。 */
             res.setHeader('Content-Type', 'application/json');
-            /* 坏文件按空库应答：浏览器本地态照常，拉回面拿不到东西不会误覆盖 */
+            /* 坏文件按空库应答：页面本地缓存照常，拉回面拿不到东西不会误覆盖 */
             res.end(JSON.stringify(readConvs() ?? { chats: [], turns: {} }));
-            res.on('finish', () => headless?.markPull());
-            return;
-          }
-          if (req.method === 'PUT') {
-            const body = (await readJsonBody(req)) as { chats?: unknown; turns?: unknown };
-            /*
-             * 坏文件拒写（500）：守卫在此文件上比对长短，读不到 server 现状时
-             * 放行会把整库换成浏览器推来的版本；拒写后浏览器下一次写会再试。
-             */
-            const current = readConvs();
-            if (current === null) {
-              res.statusCode = 500;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({ error: 'convs.json unreadable' }));
-              return;
-            }
-            const putChats = Array.isArray(body.chats) ? body.chats : [];
-            const turns =
-              headless?.guardConvsPut((body.turns ?? {}) as Record<string, Record<string, unknown>>, current.turns, putChats) ??
-              (body.turns ?? {});
-            writeConvs(putChats, turns);
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ ok: true }));
             return;
           }
           res.statusCode = 405;
@@ -5797,13 +5768,193 @@ if (req.method === 'POST' && !seg0) {
           res.end(JSON.stringify({ error: String(e) }));
         }
       });
+      
+      /*
+       * 回合提交与观看（单写者架构的页面侧入口）：
+       * - POST /api/conv/:id/turn：提交回合（单列或多列并发），system 块与
+       *   工具名清单由页面按胶囊状态组装好随请求带上；引擎是唯一执行体，
+       *   页面关闭/刷新不影响回合跑完。
+       * - GET /api/conv/:id/live：SSE 订阅该会话的回合增量（打字机、工具
+       *   结果、回合完成）。SSE 断开只是不看了；重连后 GET /api/convs 对账。
+       * - DELETE /api/conv/:id：删除会话（chats + 全部 turns 桶）。
+       * - POST /api/conv/:id/abort：停止按钮——中止该列页面提交的在跑回合。
+       * - POST /api/conv/:id/move：切模型续聊时把桶搬到新模型（旧语义保留）。
+       * - GET /api/conv/:id：单会话桶对账（回合完成后轻量拉回，防 SSE 丢事件）。
+       */
+      server.middlewares.use('/api/conv', async (req, res) => {
+        try {
+          const segs = (req.url ?? '').split('?')[0].split('/').filter(Boolean);
+          const conv = segs[0] ?? '';
+          if (!conv) {
+            res.statusCode = 404;
+            res.end();
+            return;
+          }
+          if (req.method === 'POST' && segs[1] === 'turn') {
+            const body = (await readJsonBody(req)) as {
+              text?: unknown;
+              models?: unknown;
+              images?: unknown;
+              system?: unknown;
+              tools?: unknown;
+              title?: unknown;
+              sampling?: unknown;
+            };
+            const text = typeof body.text === 'string' ? body.text : '';
+            const models = Array.isArray(body.models) ? body.models.filter((m): m is string => typeof m === 'string') : [];
+            const system = Array.isArray(body.system) ? body.system.filter((s): s is string => typeof s === 'string') : [];
+            const tools = Array.isArray(body.tools) ? body.tools.filter((t): t is string => typeof t === 'string') : [];
+            const images = Array.isArray(body.images) ? body.images.filter((i): i is string => typeof i === 'string') : undefined;
+            const sampling =
+              body.sampling && typeof body.sampling === 'object'
+                ? (body.sampling as { temperature?: number; topP?: number; maxTokens?: number })
+                : undefined;
+            if (!text || !models.length || !engine) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'text 与 models 必填' }));
+              return;
+            }
+            /* 展览模式的会话 token 随头走（与 /api/chat 代理同一取法） */
+            const headerKey = req.headers['x-swift-api-key'];
+            const apiKey = typeof headerKey === 'string' && headerKey ? headerKey : undefined;
+            const r = engine.submitTurn(conv, {
+              text,
+              models,
+              ...(images?.length ? { images } : {}),
+              system,
+              tools,
+              ...(typeof body.title === 'string' ? { title: body.title } : {}),
+              ...(sampling ? { sampling } : {}),
+              ...(apiKey ? { apiKey } : {}),
+            });
+            if ('error' in r) {
+              res.statusCode = 409;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: r.error }));
+              return;
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(r));
+            return;
+          }
+          if (req.method === 'GET' && !segs[1]) {
+            /* 单会话桶对账（回合完成/重连时轻量拉回） */
+            const current = readConvs();
+            const buckets = current?.turns[conv] ?? {};
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ buckets }));
+            return;
+          }
+          if (req.method === 'GET' && segs[1] === 'live') {
+            /*
+             * SSE：回合增量原样推给浏览器。网关兼容头（防代理缓冲）+ 心跳注释
+             * 行（30s 一拍，半开连接早死早发现）。订阅即刻回放「当前在跑」，
+             * 页面刷新重连时能补上按钮态。
+             */
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'X-Accel-Buffering': 'no',
+              Connection: 'keep-alive',
+            });
+            res.write(':ok\n\n');
+            /* 首连同步：正在跑的列名一次告知（页面刷新重连后恢复按钮态） */
+            res.write(`data: ${JSON.stringify({ type: 'sync', conv, models: engine?.busyModels(conv) ?? [] })}\n\n`);
+            const unsub = engine?.subscribe(conv, (ev) => {
+              res.write(`data: ${JSON.stringify(ev)}\n\n`);
+            }) ?? (() => undefined);
+            const beat = setInterval(() => {
+              try {
+                res.write(':beat\n\n');
+              } catch {
+                /* 连接已死：close 回调里清 */
+              }
+            }, 30_000);
+            res.on('close', () => {
+              clearInterval(beat);
+              unsub();
+            });
+            return;
+          }
+          if (req.method === 'POST' && segs[1] === 'abort') {
+            const body = (await readJsonBody(req)) as { model?: unknown };
+            const model = typeof body.model === 'string' ? body.model : '';
+            if (!model) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'model 必填' }));
+              return;
+            }
+            engine?.abortTurn(conv, model);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (req.method === 'POST' && segs[1] === 'move') {
+            /* 切模型搬桶：目标桶已有消息不动（那是该列的既有流），搬空旧桶 */
+            const body = (await readJsonBody(req)) as { from?: unknown; to?: unknown };
+            const from = typeof body.from === 'string' ? body.from : '';
+            const to = typeof body.to === 'string' ? body.to : '';
+            if (!from || !to) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'from/to 必填' }));
+              return;
+            }
+            const current = readConvs();
+            if (current === null) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'convs.json unreadable' }));
+              return;
+            }
+            const buckets = { ...(current.turns[conv] ?? {}) } as Record<string, unknown[]>;
+            if (buckets[from]?.length && !buckets[to]?.length) {
+              buckets[to] = buckets[from];
+              delete buckets[from];
+              writeConvs(current.chats, { ...current.turns, [conv]: buckets });
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (req.method === 'DELETE') {
+            /*
+             * 会话删除传播：先 retire（中止该会话在跑回合 + 屏蔽后续落盘，
+             * 防 abort 的异步尾部把已删桶重建出来），再清 chats 与 turns。
+             */
+            engine?.retire(conv);
+            const current = readConvs();
+            if (current === null) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'convs.json unreadable' }));
+              return;
+            }
+            const chats = [...current.chats].filter((c) => (c as { id?: unknown })?.id !== conv);
+            const turns = { ...current.turns };
+            delete turns[conv];
+            writeConvs(chats, turns);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          res.statusCode = 404;
+          res.end();
+        } catch (e) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: String(e) }));
+        }
+      });
 
       /*
-       * headless 审批面：GET ?conv= 列该对话的在途审批 + 共用白名单（浏览器
-       * 打开时渲染成审批卡、把白名单灌进本地允许集）；POST /:id { approve,
-       * alwaysAllow? } 用户决定（勾了总是允许就把命令收进白名单），挂起的
-       * server 回合 1s 内恢复；POST /allow { command } 浏览器侧「总是允许」
-       * 同步（headless 与页面共用一份落盘白名单）。
+       * 引擎审批面（端点名沿用 headless 时代，前端零改动）：GET ?conv= 列
+       * 该对话的在途审批 + 共用白名单（浏览器打开时渲染成审批卡、把白名单灌
+       * 进本地允许集）；POST /:id { approve, alwaysAllow? } 用户决定（勾了总是
+       * 允许就把命令收进白名单），挂起的 server 回合 1s 内恢复；POST /allow
+       * { command } 浏览器侧「总是允许」同步（引擎与页面共用一份落盘白名单）。
        */
       server.middlewares.use('/api/headless/approvals', async (req, res) => {
         try {
@@ -5815,8 +5966,8 @@ if (req.method === 'POST' && !seg0) {
             res.setHeader('Content-Type', 'application/json');
             res.end(
               JSON.stringify({
-                approvals: conv ? headless?.listPendingApprovals(conv) ?? [] : [],
-                allowed: headless?.listAllowedCommands() ?? [],
+                approvals: conv ? engine?.listPendingApprovals(conv) ?? [] : [],
+                allowed: engine?.listAllowedCommands() ?? [],
               }),
             );
             return;
@@ -5830,14 +5981,14 @@ if (req.method === 'POST' && !seg0) {
               res.end(JSON.stringify({ error: 'command 必填' }));
               return;
             }
-            headless?.addAllowedCommand(command);
+            engine?.addAllowedCommand(command);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ ok: true }));
             return;
           }
           if (req.method === 'POST' && seg0) {
             const body = (await readJsonBody(req)) as { approve?: boolean; alwaysAllow?: boolean };
-            const ok = headless?.resolveApproval(seg0, body.approve === true, body.alwaysAllow === true) ?? false;
+            const ok = engine?.resolveApproval(seg0, body.approve === true, body.alwaysAllow === true) ?? false;
             if (!ok) {
               res.statusCode = 404;
               res.setHeader('Content-Type', 'application/json');
@@ -5893,23 +6044,16 @@ if (req.method === 'POST' && !seg0) {
           const apiKey = sessionKey || config.apiKey;
           const { model: _id, ...openaiBody } = body;
           const upstreamAbort = new AbortController();
-          const convHeader = req.headers['x-webui-conv'];
-          const conv = typeof convHeader === 'string' ? convHeader : '';
           /*
            * 客户端断开跟随中止：上游黑洞（连接建立却不消费请求体、不回响应）时
            * 浏览器侧迟早放弃/刷新/关页，若不跟随，中间件会一直持有挂死的上游
            * fetch 与滞留在发送缓冲的请求体（连接泄漏）。挂 res 的 close（响应
            * 完成与连接断开都触发，writableEnded 区分二者；req 的 close 在新版
-           * node 上只表示请求流消费完毕，连接中断不触发——实测不 fire）。
-           * 带 x-webui-conv 的页面回合另有断口登记：响应未写完而连接先断 =
-           * 回合被掐（关页面/断网），交给 headlessTimer 的中断恢复续轮。
+           * node 上只表示请求流消费完毕，连接中断不触发——实测不 fire）。回
+           * 合执行体在引擎侧，浏览器断开不影响回合跑完，这里只需管连接卫生。
            */
           res.on('close', () => {
             upstreamAbort.abort();
-            if (conv && !res.writableEnded) {
-              pageTurnAborts.set(conv, Date.now());
-              console.log(`[chat-break] conv=${conv} 登记断口（响应未完连接先断）`);
-            }
           });
           /*
            * 服务端自己的响应头超时：预览链路的本地代理会保活与 vite 的连接，

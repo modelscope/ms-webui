@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { RotateCw } from 'lucide-react';
 import { ActionButton, TaskDetailShell, MetaCell } from '@/components/TaskDetailShell';
 import { LogViewer } from '@/components/LogViewer';
 import { PageAssistant } from '@/components/PageAssistant';
-import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
 import { MODULES } from '@/theme/modules';
 import { mapTaskStatus, type TaskItem } from '@/mock/types';
@@ -46,7 +45,6 @@ export function ScriptsDetailPage() {
   /* 页面 AI 助手：任务管理工具（列出/停止/重命名），入口在页头 Bot 按钮 */
   const [assistantOpen, setAssistantOpen] = useState(false);
   const { settings } = useSettings();
-  const assistantTools = useMemo(() => moduleTaskTools('script'), []);
 
   const refresh = useCallback(async () => {
     try {
@@ -134,7 +132,7 @@ export function ScriptsDetailPage() {
         open={assistantOpen}
         onClose={() => setAssistantOpen(false)}
         module={MODULES.scripts.key}
-        tools={assistantTools}
+        toolNames={['task:script']}
         confirmBeforeApply={settings.aiConfirmBeforeApply}
       />
     </>

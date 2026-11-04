@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { TaskListPage } from '@/components/TaskListPage';
 import { MODULES } from '@/theme/modules';
 import { PageAssistant } from '@/components/PageAssistant';
-import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
 import { mapTaskStatus, type TaskItem } from '@/mock/types';
 import { listExports, renameExport, stopExport, type ExportTaskInfo } from '@/api/export';
@@ -41,7 +40,6 @@ export function ExportListPage() {
   /* 页面 AI 助手：任务管理工具（列出/停止/删除/重命名），入口在页头 Bot 按钮 */
   const [assistantOpen, setAssistantOpen] = useState(false);
   const { settings } = useSettings();
-  const assistantTools = useMemo(() => moduleTaskTools('export'), []);
 
   const refresh = useCallback(async () => {
     try {
@@ -81,7 +79,7 @@ export function ExportListPage() {
         open={assistantOpen}
         onClose={() => setAssistantOpen(false)}
         module={MODULES.export.key}
-        tools={assistantTools}
+        toolNames={['task:export']}
         confirmBeforeApply={settings.aiConfirmBeforeApply}
       />
     </>

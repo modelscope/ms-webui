@@ -664,6 +664,7 @@ export const en: Partial<MessageTable> = {
   'chat.deleteChatTitle': 'Delete this conversation?',
   'chat.deleteChatDesc': 'The messages of "{title}" will be removed as well. This cannot be undone.',
   'chat.errCompareModels': 'Pick the models to compare first',
+  'chat.errSubmit': 'Failed to submit the turn; retry shortly',
   'chat.errPickModel': 'Select a model below the input first',
   'chat.noSwitchStreaming': 'Cannot switch models while a reply is streaming. Stop it or wait for it to finish first.',
   'chat.noApproval': 'No approvals',

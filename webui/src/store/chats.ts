@@ -7,7 +7,6 @@
  */
 
 import { useSyncExternalStore } from 'react';
-import { scheduleConvPush } from './convsSync';
 
 export interface ChatMeta {
   /** 会话 id，同时是消息分桶（turns）的键 */
@@ -51,7 +50,6 @@ function persist() {
     /* 写失败只影响持久化，不影响本次会话 */
   }
   /* 服务端镜像：任何会话面写（含删除）都触发防抖推送 */
-  scheduleConvPush();
 }
 
 /** 注册/刷新一段会话：已存在的只上浮并更新时间，标题保持首句 */

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
@@ -7,7 +7,6 @@ import { CodeBlock } from '@/components/CodeBlock';
 import { LogViewer } from '@/components/LogViewer';
 import { MODULES } from '@/theme/modules';
 import { PageAssistant } from '@/components/PageAssistant';
-import { moduleTaskTools } from '@/agent/taskTools';
 import { useSettings } from '@/settings/SettingsContext';
 import { mapTaskStatus, type TaskItem } from '@/mock/types';
 import { getDeployLog, listDeploys, renameDeploy, stopDeploy, type DeployTaskInfo } from '@/api/deploy';
@@ -61,7 +60,6 @@ export function DeployDetailPage({ tab }: { tab: 'overview' | 'log' }) {
   /* 页面 AI 助手：任务管理工具（列出/停止/删除/重命名），入口在页头 Bot 按钮 */
   const [assistantOpen, setAssistantOpen] = useState(false);
   const { settings } = useSettings();
-  const assistantTools = useMemo(() => moduleTaskTools('deploy'), []);
   const navigate = useNavigate();
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [infos, setInfos] = useState<DeployTaskInfo[]>([]);
@@ -219,7 +217,7 @@ print(resp.choices[0].message.content)`;
         open={assistantOpen}
         onClose={() => setAssistantOpen(false)}
         module={MODULES.deploy.key}
-        tools={assistantTools}
+        toolNames={['task:deploy']}
         confirmBeforeApply={settings.aiConfirmBeforeApply}
       />
     </>

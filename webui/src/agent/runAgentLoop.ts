@@ -53,8 +53,6 @@ export interface AgentLoopOptions {
    * 工具轮。正在执行的工具任其跑完——半途掐断写操作比让它落完更糟。
    */
   signal?: AbortSignal;
-  /** 发起回合的会话 id（页面回合传）：透传给代理中间件做中断回合登记 */
-  convId?: string;
   events: AgentLoopEvents;
 }
 
@@ -98,7 +96,6 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<void> {
             ...(schemas.length ? { tools: schemas } : {}),
             ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
             ...(opts.signal ? { signal: opts.signal } : {}),
-            ...(opts.convId ? { convId: opts.convId } : {}),
           },
         );
         toolCalls = r.toolCalls;
