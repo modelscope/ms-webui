@@ -58,6 +58,13 @@ export interface TurnEngineDeps {
   summariesFile(): string;
   /** 审批落盘目录（~/.swift/webui） */
   dataDir(): string;
+  /*
+   * 回合非正常死亡时通知（换代腰斩、上游断流等）：唤醒事件已被回合消费
+   * 即丢，调用方把补偿事件推回该会话的事件队列，下一拍（5s）重新唤醒
+   * 续轮——否则只能等 30 分钟停摆哨兵。引擎侧带每会话冷却，防上游持续
+   * 断流时的补偿风暴。
+   */
+  onSeveredTurn?(conv: string, model: string): void;
 }
 
 /** 页面提交的回合材料：system 块与工具名清单由页面按胶囊状态组装 */
@@ -175,6 +182,19 @@ let currentEpoch = 0;
 export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
   const epoch = ++currentEpoch;
   const isCurrent = (): boolean => epoch === currentEpoch;
+  /*
+   * 回合非正常死亡的补偿通知（带每会话 5 分钟冷却）：换代腰斩与同代断流
+   * 共用——补偿事件的语义是「续轮」，不是「重跑」，风暴窗口内静默丢弃
+   * （stall 哨兵仍是最终兜底）。
+   */
+  const severedAt = new Map<string, number>();
+  const notifySevered = (conv: string, model: string): void => {
+    const key = `${conv}\u0000${model}`;
+    const now = Date.now();
+    if (now - (severedAt.get(key) ?? 0) < 5 * 60_000) return;
+    severedAt.set(key, now);
+    deps.onSeveredTurn?.(conv, model);
+  };
   /* 摘要存储换 node 后端（文件全表读写，与 localStorage 同语义） */
   setSummaryStorage({
     load: () => {
@@ -347,7 +367,11 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         /* 固定 system（指引/skills 文档）与对话共享上下文预算：阈值要扣掉它 */
         reservedTokens: estimateTokens(opts.system),
       });
-      if (!isCurrent()) return;
+      if (!isCurrent()) {
+        /* 换代腰斩在起步段：唤醒事件已被 prepare 消费，通知补偿 */
+        notifySevered(conv, model);
+        return;
+      }
       const history: ChatMessage[] = [...opts.system, ...compressed];
       appendTurn(conv, model, opts.userMsg);
       /* 唤醒回合的合成 user 消息实时进在线页面的视图（页面回合本地已 append，SSE 侧去重） */
@@ -405,6 +429,18 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
           },
           onError: (errorText) => {
             flushAssistant();
+            /*
+             * 换代（vite 热重启掐断在飞流，典型形态 TypeError: terminated）：
+             * 错误源于重启而非模型，写穿历史只会留下毒消息；补偿事件由
+             * onSeveredTurn 通知，新实例续轮。
+             */
+            if (!isCurrent()) return;
+            /*
+             * 同代的流级中断（上游断流/网络抖动，典型 TypeError: terminated）：
+             * 错误照常可见，但唤醒事件已随回合消费即丢——同样推补偿，靠冷却
+             * 防上游持续断流时的循环唤醒。
+             */
+            notifySevered(conv, model);
             const msg: ChatMessage = { role: 'assistant', content: errorText };
             appendTurn(conv, model, msg);
             broadcast({ type: 'error', conv, model, message: msg, error: errorText });
@@ -415,7 +451,11 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
           },
         },
       });
-      if (!isCurrent()) return; /* 换代：尾条消息仍落盘（上面已 append），锁由旧闭包自己清 */
+      if (!isCurrent()) {
+        /* 换代腰斩在中途：已消费的唤醒事件补偿，新实例接管续轮 */
+        notifySevered(conv, model);
+        return;
+      }
       flushAssistant();
       console.log(`[turn] 回合完成 ${opts.label}（${conv}/${model}）`);
       broadcast({ type: 'turn-done', conv, model });

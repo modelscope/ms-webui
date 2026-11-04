@@ -24,6 +24,8 @@ export const CONTEXT_RESERVE_TOKENS = 4096;
 const MIN_DIALOGUE_TOKENS = 6000;
 /** 压缩后保留原文的最近消息条数（对话轮语义，实际切点会对齐到 user 边界） */
 const KEEP_RECENT_MSGS = 8;
+/** 摘要请求的单次输入封顶：超限分段摘（covered 每轮推进），请求体永不超上下文 */
+const SUMMARIZER_INPUT_CAP_TOKENS = 16000;
 /** 一张图片的粗估 token（多模态编码 800 上下，只做触发判断用） */
 const IMAGE_TOKENS = 800;
 /** 每条消息的角色标记等结构性开销 */
@@ -177,8 +179,9 @@ const SUMMARIZER_SYSTEM =
   '保留对继续对话有用的细节，丢弃寒暄与过程性内容。直接输出摘要正文，不要任何前缀说明。';
 
 /**
- * 压缩入口：未超阈值原样返回；超阈值把 dialogue[0..k) 摘要成一条 system
- * 消息。摘要调用失败降级为不压缩——压缩是优化，不能让它挡住对话。
+ * 压缩入口：未超阈值原样返回；超阈值把 dialogue[0..cut) 摘要成一条 system
+ * 消息（cut 是分窗后的切点，长对话分多轮追平）。摘要调用失败降级为「截断
+ * 声明 + 近窗」而非全量——全量会顶穿单回合预算，让截短每轮空转。
  */
 export async function compressHistory(opts: {
   convId: string;
@@ -218,16 +221,50 @@ export async function compressHistory(opts: {
     ];
   }
 
+  /*
+   * 摘要分窗：待摘段（含上一版摘要）按 token 封顶，超限就把本轮切点向前
+   * 收缩到能装下的最后一条消息——covered 每轮推进一段，长对话分多轮追平。
+   * 不封顶时首次压缩的 transcript 就是全量旧对话（实测 6.9 万 token），
+   * 摘要请求本身超上下文，必然失败且永远失败（下轮只会长更大）。
+   */
+  let cut = k;
+  if (covered < k) {
+    let acc = estimateTokens([{ role: 'user', content: prevSummary }]);
+    let i = covered;
+    for (; i < k; i++) {
+      const next = acc + estimateTokens([dialogue[i]]);
+      if (acc > 0 && next > SUMMARIZER_INPUT_CAP_TOKENS) break;
+      acc = next;
+    }
+    /* 至少推进一条：单条超限也带上（封顶按条数计，有界） */
+    cut = Math.max(covered + 1, i);
+  }
+
   const transcript = [
     ...(prevSummary ? [`[上一版摘要]\n${prevSummary}`] : []),
-    ...dialogue.slice(covered, k).map(serializeForSummary),
+    ...dialogue.slice(covered, cut).map(serializeForSummary),
   ].join('\n\n');
+
+  /*
+   * 失败降级：不再全量返回——全量（实测 7.8 万 token）会顶穿单回合预算，
+   * 截短每轮从头重做且永远回不到预算内（不可截的 toolCalls 参数就占两万
+   * 多 token）。降级为「截断声明 + 近窗」：与成功形态同构、有界；完整原文
+   * 在对话记录里不受影响，下一轮重试摘要（covered 未推进）。
+   */
+  const fallback = (): ChatMessage[] => [
+    {
+      role: 'system',
+      content:
+        '此前对话较长，较早已从本回合截断以守住上下文预算（完整原文在对话记录里；重要结论请写入文件而不是依赖历史回看）。',
+    },
+    ...dialogue.slice(cut),
+  ];
 
   try {
     /*
-     * 摘要被 max_tokens 截断时的处理：截断的非空摘要会以 covered=k 落盘，
+     * 摘要被 max_tokens 截断时的处理：截断的非空摘要会以 covered=cut 落盘，
      * 丢失的段落永不补回——先翻倍重试一次；仍截断再用非空部分（部分摘要
-     * 仍优于全丢）；完全没产出才降级为不压缩。
+     * 仍优于全丢）；完全没产出才走降级。
      */
     let roundMaxTokens = 2048;
     for (let attempt = 0; ; attempt += 1) {
@@ -255,14 +292,18 @@ export async function compressHistory(opts: {
         roundMaxTokens = 8192;
         continue;
       }
-      if (!summary) return dialogue;
-      saveSummary(convId, modelId, { summary, covered: k });
+      if (!summary) {
+        console.log(`[compress] ${convId} 摘要空产出，降级为截断保底（covered=${covered}, cut=${cut}）`);
+        return fallback();
+      }
+      saveSummary(convId, modelId, { summary, covered: cut });
       return [
         { role: 'system', content: `此前对话的要点摘要：\n${summary}` },
-        ...dialogue.slice(k),
+        ...dialogue.slice(cut),
       ];
     }
-  } catch {
-    return dialogue;
+  } catch (e) {
+    console.log(`[compress] ${convId} 摘要请求失败，降级为截断保底: ${String(e)}`);
+    return fallback();
   }
 }

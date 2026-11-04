@@ -3526,6 +3526,18 @@ function swiftApiPlugin(): Plugin {
         },
         summariesFile: () => join(swiftHome(), 'summaries.json'),
         dataDir: () => swiftHome(),
+        onSeveredTurn: (conv, model) => {
+          /*
+           * 回合非正常死亡的补偿（换代腰斩/上游断流）：唤醒事件已被回合消
+           * 费即丢，不补就等 30 分钟停摆哨兵。走 conv 事件队列（带 modelId，
+           * 下一拍 5s 由 turnTick 消费起续轮回合）——不依赖研究档案存在，
+           * 纯对话里自跑脚本的研究同样被覆盖。
+           */
+          pushConvEvent(conv, {
+            text: `回合异常中断（流式断开）。本回合消费的唤醒事件在此补偿：读最新对话尾部与工作区文件定位断点，继续推进；无法推进就总结现状并上报用户，不要停在原地。`,
+            modelId: model,
+          });
+        },
       });
       /*
        * 重启恢复两步，顺序即真相优先级：收编（活进程，最新真相）先，历史
