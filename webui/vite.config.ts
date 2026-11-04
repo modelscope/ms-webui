@@ -2531,15 +2531,25 @@ function startResearchEval(session: ResearchSession, adapters: string, gpus?: nu
   const id = `eval-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const dir = join(swiftHome(), 'eval', id);
   mkdirSync(dir, { recursive: true });
+  /*
+   * dataset 名归一化：evalPlan.metric.dataset 是模型访谈阶段起的自由文本
+   * （如「live_code_bench (release_v6)」——括号是版本注记），而 swift eval 的
+   * --eval_dataset 要求 EvalScope 注册表精确名（live_code_bench）。剥掉尾部
+   * 括号注记再传；名字本身仍由 CLI 的 fail-loudly 校验兜底（失败事件带
+   * 完整 supported 清单）。注：evalscope 的 live_code_bench 是固化的 lite
+   * 版，括号里的版本注记无法精确表达（要精确版本走自建 harness 的 custom
+   * 通道），此处只保「名字合法、评测能跑」。
+   */
+  const dataset = session.evalPlan.metric.dataset.replace(/\s*[(（][^)）]*[)）]\s*$/, '').trim();
   const task: EvalTask = {
     id,
     modelId: `research:${session.id}`,
-    name: `研究 ${session.id.slice(-6)} · ${session.evalPlan.metric.dataset}`,
+    name: `研究 ${session.id.slice(-6)} · ${dataset}`,
     model: session.baseModel,
     baseUrl: '',
     items: [
       {
-        dataset: session.evalPlan.metric.dataset,
+        dataset,
         ...(session.evalPlan.metric.limit ? { limit: session.evalPlan.metric.limit } : {}),
       },
     ],
