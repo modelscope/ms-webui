@@ -41,7 +41,13 @@ export function estimateTokens(messages: ChatMessage[]): number {
   for (const m of messages) {
     total += MSG_OVERHEAD_TOKENS;
     total += count(m.content);
-    if (m.reasoning) total += count(m.reasoning);
+    /*
+     * reasoning 不计：它只用于渲染/落盘，toOpenAiShape 发请求时整体剥离。
+     * 这里计数是为了估「发出去的请求体」，把它算进去会虚增压力——曾有一条
+     * 退化的思维链（19 万字符重复循环，正文零产出）被虚记成十几万 token，
+     * 把压缩与单回合预算的判断永久顶穿：截短提示每轮刷屏，而被截掉的恰恰
+     * 是模型真正看得到的工具结果。
+     */
     if (m.toolCallId) total += MSG_OVERHEAD_TOKENS;
     for (const c of m.toolCalls ?? []) total += count(`${c.name} ${c.arguments}`);
     if (m.images?.length) total += m.images.length * IMAGE_TOKENS;
