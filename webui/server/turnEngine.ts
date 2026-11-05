@@ -198,7 +198,7 @@ function buildTools(
   conv: string,
   model: string,
   userRequest: string,
-  onPendingCreate?: (link: CreatedLink) => Promise<string>,
+  onPendingCreate: (link: CreatedLink) => Promise<string>,
 ): AgentTool[] {
   const out: AgentTool[] = [];
   for (const name of names) {
@@ -210,7 +210,7 @@ function buildTools(
     else if (name === 'workspace') out.push(...workspaceTools(conv, model));
     else if (name === 'research') out.push(...researchTools(conv, model));
     else if (name === 'web') out.push(webSearchTool());
-    else if (name === 'home') out.push(...homeTools({ userRequest, conv, model, ...(onPendingCreate ? { onPendingCreate } : {}) }));
+    else if (name === 'home') out.push(...homeTools({ userRequest, conv, model, onPendingCreate }));
     else if (name.startsWith('task:')) out.push(...moduleTaskTools(name.slice(5) as 'train' | 'eval' | 'export' | 'deploy' | 'script'));
   }
   return out;

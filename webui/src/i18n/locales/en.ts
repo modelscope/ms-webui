@@ -1393,7 +1393,7 @@ export const en: Partial<MessageTable> = {
   'settings.customPromptName': 'Custom {n}',
   'assistant.generalPersona': 'General assistant',
   'assistant.pageAssistantTitle': '{label} assistant',
-  'assistant.introFields': 'I can directly change the {n} fields of {label}. Just say the word for a starting value or an explanation of any field.',
+  'assistant.introFields': 'I can help fill or change every CLI parameter of the {label} form. Just say the word for a starting value or an explanation of any field.',
   'assistant.introTasks': 'I can list tasks, stop tasks, rename them, or take direct instructions.',
   'assistant.cfgActLabel': '{label}: {from}{to}',
   'assistant.cfgActFill': 'set to ',

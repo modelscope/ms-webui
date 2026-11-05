@@ -1394,7 +1394,7 @@ export const zh = {
   'settings.customPromptName': '自定义 {n}',
   'assistant.generalPersona': '通用助手',
   'assistant.pageAssistantTitle': '{label}助手',
-  'assistant.introFields': '{label}的 {n} 个字段我可以直接改。要起手值或解释哪个字段，说一声就行。',
+  'assistant.introFields': '{label}的全部 CLI 参数我都可以协助填写与修改。要起手值或解释哪个字段，说一声就行。',
   'assistant.introTasks': '可以列任务、停任务、重命名，也可以直接下指令。',
   'assistant.cfgActLabel': '{label}：{from}{to}',
   'assistant.cfgActFill': '填 ',

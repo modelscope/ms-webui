@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import type { AiMessage, ActionState } from '@/components/AiChatPanel';
-import { messageId, userMessage } from '@/components/AiChatPanel';
+import { messageId, reconcileEngineMessages, toEngineDisplay, userMessage } from '@/components/AiChatPanel';
 import { pushChat } from '@/store/chats';
 import {
   submitTurn,
@@ -273,23 +273,10 @@ export const ASSISTANT_SYSTEM_PROMPT = `你是 ms-swift 可视化编排页的流
 - 不确定就说不确定，不要编造图上不存在的参数或节点。`;
 
 /**
- * 会话桶里的 ChatMessage → 面板展示消息。思维链/工具调用/工具结果以
- * 结构化字段交给面板渲染折叠卡（与对话页同一套），不再折成一行文本。
+ * 会话桶的 ChatMessage → 面板展示消息：共享基础版（编排页用户消息不带图片）。
+ * 思维链/工具调用/工具结果以结构化字段交给面板渲染折叠卡（与对话页同一套）。
  */
-function toDisplay(m: ChatMessage): FlowMessage {
-  if (m.role === 'user') return { id: messageId(), role: 'user', text: m.content };
-  if (m.role === 'tool') {
-    /* text 留空：面板对只有工具结果的消息不画正文气泡，折叠卡独立成行 */
-    return { id: messageId(), role: 'assistant', text: '', toolResult: m.content };
-  }
-  return {
-    id: messageId(),
-    role: 'assistant',
-    text: m.content,
-    ...(m.reasoning ? { reasoning: m.reasoning } : {}),
-    ...(m.toolCalls?.length ? { toolCalls: m.toolCalls } : {}),
-  };
-}
+const toDisplay = (m: ChatMessage): FlowMessage => toEngineDisplay<AiAction>(m);
 
 /** 拖拽页的三个页面工具（schema 随回合提交；执行体在页面，经挂起协议回传） */
 const FLOW_PAGE_TOOLS: PageToolSpec[] = [
@@ -518,10 +505,12 @@ export function useFlowAiChat({
         }
         case 'turn-done':
           setStreaming(false);
+          /* 对账兑底：桶拉回重建，本地未决卡片插回（与页面助手同一语义——
+           * 引擎桶里只有回执文本，整列重置会抹掉用户还没点「应用」的提议卡） */
           void fetchConvBuckets(conv).then((buckets) => {
             const bucket = buckets[model] ?? [];
             if (!bucket.length) return;
-            setMessages(bucket.map((m) => toDisplay(m)));
+            setMessages((prev) => reconcileEngineMessages(prev, bucket, toDisplay));
           });
           return;
       }
@@ -589,12 +578,16 @@ export function useFlowAiChat({
     const focus = ctxNow.node
       ? `用户当前选中的节点：${ctxNow.node.id}（${NODE_TYPES[ctxNow.node.type]?.label ?? ctxNow.node.type}）。优先回答与它相关的问题。\n\n`
       : '';
+    const isNew = conv !== convId;
     const r = await submitTurn(conv, {
       text,
       models: [model],
       system: [`${ASSISTANT_SYSTEM_PROMPT}\n\n${focus}当前图：\n${graphContextText(ctxNow)}`],
       tools: [],
       pageTools: FLOW_PAGE_TOOLS,
+      /* 新会话把标题一并交给引擎建档（server 侧 chats 注册表与本机同步，
+       * 首页会话列表才能看到这段对话） */
+      ...(isNew ? { title } : {}),
     });
     if ('error' in r) {
       setStreaming(false);

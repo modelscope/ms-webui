@@ -3,7 +3,7 @@ import { ArrowUp, Bot, Check, Loader2, Square, User, X, Zap } from 'lucide-react
 import { cn } from 'cn';
 import { Hint } from '@/components/Hint';
 import { ThinkingBlock, ToolFold, fmtCallArgs } from '@/components/ChatBlocks';
-import type { ToolCall } from '@/api/models';
+import type { ChatMessage, ToolCall } from '@/api/models';
 import { useT } from '@/i18n';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -77,6 +77,43 @@ export const messageId = () => `ai${Date.now().toString(36)}${seq++}`;
  */
 export function userMessage(text: string): AiMessage<never> {
   return { id: messageId(), role: 'user', text };
+}
+
+/**
+ * 会话桶里的 ChatMessage → 面板展示消息（通用基础版）。思维链/工具调用/
+ * 工具结果以结构化字段交给面板渲染折叠卡（与对话页同一套）。需要还原
+ * user 图片的调用方（配置助手）在此之上补 images 字段。
+ */
+export function toEngineDisplay<A>(m: ChatMessage): AiMessage<A> {
+  if (m.role === 'user') return { id: messageId(), role: 'user', text: m.content };
+  if (m.role === 'tool') {
+    /* text 留空：面板对只有工具结果的消息不画正文气泡，折叠卡独立成行 */
+    return { id: messageId(), role: 'assistant', text: '', toolResult: m.content };
+  }
+  return {
+    id: messageId(),
+    role: 'assistant',
+    text: m.content,
+    ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+    ...(m.toolCalls?.length ? { toolCalls: m.toolCalls } : {}),
+  };
+}
+
+/**
+ * turn-done 对账合并：桶是唯一真相源，但页面工具产出的卡片消息只活在本地
+ * （引擎桶里只有回执文本，卡片结构不落盘）——整列重置会把它抹掉，用户就
+ * 看到「模型说已列卡片、面板却没动」的断层。仍含 pending 的卡片消息按原
+ * 顺序插回重建列末尾（已 applied/ignored 的沉没：结果已在表单/图上）；
+ * 切会话/重开面板走全新建，不保留卡片。
+ */
+export function reconcileEngineMessages<A>(
+  prev: AiMessage<A>[],
+  bucket: ChatMessage[],
+  toDisplay: (m: ChatMessage) => AiMessage<A> = toEngineDisplay,
+): AiMessage<A>[] {
+  const rebuilt = bucket.map(toDisplay);
+  const cards = prev.filter((m) => m.actions?.length && m.states?.some((s) => s === 'pending'));
+  return cards.length ? [...rebuilt, ...cards] : rebuilt;
 }
 
 export function AiChatPanel<A>({

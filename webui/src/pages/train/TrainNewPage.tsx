@@ -712,17 +712,21 @@ export function TrainNewPage() {
      * 奖励通道与 vLLM 显存占比（与页面奖励通道区同源）：GRPO 必须至少
      * 一条奖励通道（CLI 校验 fail-loud，提交门也拦）。组规划 (deriveGroups)
      * 读 params.orm/prm 展开奖励组；规则名清单来自 ormRules 注册表探测，
-     * 也可写模型 id（每 id 独占一组）——候选拼进 label 给模型看。
+     * 也可写模型 id（每 id 独占一组）——候选拼进 orm 的 label 给模型看。
+     * 三个需要给模型额外指引的字段显式覆盖 label；generation_batch_size
+     * 走 paramCfg 缺省（i18n label/hint 已备）。
      */
-    ...ONLINE_RL_PARAMS.map((f) => ({
-      ...paramCfg(f, onlineRlActive, ONLINE_RL_SCOPE),
-      label:
-        f.key === 'orm'
-          ? `orm（${t('tf.orm')}；grpo 必须至少一条。规则注册表：${ormRules.orm.join(' ') || '（探测中，可用 accuracy 等内置规则）'}）`
-          : f.key === 'prm'
-            ? `prm（${t('tf.prm')}；可选，可与 orm 并存）`
-            : 'vllm_gpu_memory_utilization（colocate 下 vLLM 占卡显存比例；默认 0.9 会挤爆共卡训练，建议 0.5）',
-    })),
+    ...ONLINE_RL_PARAMS.map((f) => {
+      const cfg = paramCfg(f, onlineRlActive, ONLINE_RL_SCOPE);
+      if (f.key === 'orm') {
+        cfg.label = `orm（${t('tf.orm')}；grpo 必须至少一条。规则注册表：${ormRules.orm.join(' ') || '（探测中，可用 accuracy 等内置规则）'}）`;
+      } else if (f.key === 'prm') {
+        cfg.label = `prm（${t('tf.prm')}；可选，可与 orm 并存）`;
+      } else if (f.key === 'vllm_gpu_memory_utilization') {
+        cfg.label = 'vllm_gpu_memory_utilization（colocate 下 vLLM 占卡显存比例；默认 0.9 会挤爆共卡训练，建议 0.5）';
+      }
+      return cfg;
+    }),
     /*
      * 通用与 LoRA/RL 专有参数：运行位置字段（server_base_url、ray_exp_name）的
      * 生效条件挂 active（mode 值判据）而非从可写面剔除——剔除会让模型

@@ -15,7 +15,7 @@ import {
 import { listSkills, buildSkillsSystem } from '@/api/skills';
 import { CONFIG_ASSISTANT_GUIDE } from '@/agent/builtin';
 import { normalizeImage } from './attachments';
-import { AiChatPanel, messageId, userMessage, type AiMessage } from './AiChatPanel';
+import { AiChatPanel, messageId, reconcileEngineMessages, toEngineDisplay, userMessage, type AiMessage } from './AiChatPanel';
 import { EngineApprovalCard } from './EngineApprovalCard';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from './ui/sheet';
 import { SelectInput } from './FormField';
@@ -87,39 +87,20 @@ const SUGGESTIONS: Partial<Record<ModuleKey, MessageKey[]>> = {
 };
 
 /**
- * 会话桶里的 ChatMessage → 面板展示消息（用户图片随消息回显）。思维链/
- * 工具调用/工具结果以结构化字段交给面板渲染折叠卡（与对话页同一套），
- * 不再折成一行文本。
+ * 会话桶里的 ChatMessage → 面板展示消息：共享基础版 + 用户图片还原
+ * （turn-done 对账后图片不丢）。
  */
 function toDisplay(m: ChatMessage): AiMessage<ConfigAction> {
-  if (m.role === 'user') return { id: messageId(), role: 'user', text: m.content, ...(m.images?.length ? { images: m.images } : {}) };
-  if (m.role === 'tool') {
-    /* text 留空：面板对只有工具结果的消息不画正文气泡，折叠卡独立成行 */
-    return { id: messageId(), role: 'assistant', text: '', toolResult: m.content };
-  }
-  return {
-    id: messageId(),
-    role: 'assistant',
-    text: m.content,
-    ...(m.reasoning ? { reasoning: m.reasoning } : {}),
-    ...(m.toolCalls?.length ? { toolCalls: m.toolCalls } : {}),
-  };
+  return m.role === 'user' && m.images?.length
+    ? { ...toEngineDisplay<ConfigAction>(m), images: m.images }
+    : toEngineDisplay<ConfigAction>(m);
 }
 
-/**
- * turn-done 对账合并：桶是唯一真相源，但页面工具产出的卡片消息只活在本地
- * （引擎桶里只有回执文本，卡片结构不落盘）——整列重置会把它抹掉，用户
- * 就看到「模型说已列卡片、面板却没动」的断层。卡片按原顺序插回重建列
- * 末尾；切会话/重开面板走 restoreConversation（全新建，不保留卡片）。
+/*
+ * turn-done 对账合并：桶重建但本地卡片插回（见 AiChatPanel
+ * reconcileEngineMessages）。卡片的插入依赖桶里没有它的副本——引擎
+ * 只落盘回执文本。
  */
-function reconcile(
-  prev: AiMessage<ConfigAction>[],
-  bucket: ChatMessage[],
-): AiMessage<ConfigAction>[] {
-  const rebuilt = bucket.map((m) => toDisplay(m));
-  const cards = prev.filter((m) => m.actions?.length);
-  return cards.length ? [...rebuilt, ...cards] : rebuilt;
-}
 
 export function PageAssistant({
   open,
@@ -169,9 +150,12 @@ export function PageAssistant({
   /* SSE 事件回调（page-tool 等）里读最新消息：render 闭包会过期，与 aiAssist 的 ctxRef 同一模式 */
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
-  /* 同一过期闭包问题也适用于 onSubmit：SSE 回调里调用的必须是最新 render 的提交闭包 */
+  /* 同一过期闭包问题也适用于 onSubmit 与 fields：SSE 回调里调用的必须是最新 render 的闭包
+   * （fields 的值与 active 判据捕获的形态键都随渲染变，读旧快照会让虚拟形态算错） */
   const onSubmitRef = useRef(onSubmit);
   onSubmitRef.current = onSubmit;
+  const fieldsRef = useRef(fields);
+  fieldsRef.current = fields;
   const [draft, setDraft] = useState('');
   const [streaming, setStreaming] = useState(false);
   /* 多模态附件（data URL）：随回合提交给引擎，与首页同一条压缩入口 */
@@ -387,11 +371,11 @@ export function PageAssistant({
         }
         case 'turn-done':
           setStreaming(false);
-          /* 对账兜底：桶拉回重建，但本地卡片消息插回（否则确认面被抹掉） */
+          /* 对账兑底：桶拉回重建，本地未决卡片插回（否则确认面被抹掉） */
           void fetchConvBuckets(conv).then((buckets) => {
             const bucket = buckets[model] ?? [];
             if (!bucket.length) return;
-            setMessages((prev) => reconcile(prev, bucket));
+            setMessages((prev) => reconcileEngineMessages(prev, bucket, toDisplay));
           });
           return;
       }
@@ -401,10 +385,9 @@ export function PageAssistant({
   }, [convId, model]);
 
   /*
-   * 引擎回合的审批面：任务工具（stop_task / delete_task 等）的审批在
-   * server 侧挂起（approvals.json），轮询拉回渲染——决定走 POST，引擎
-   * 恢复回合。与本地 useApproval 审批卡同一样式、两个来源互不替代
-   * （本地面板卡只管配置模式的页面工具）。
+   * 引擎回合的审批面：任务工具（stop_task / delete_task / flow_control 等）
+   * 与带 approval 元数据的页面工具都在 server 侧挂起（approvals.json），
+   * 轮询拉回渲染——决定走 POST，引擎恢复回合。
    */
   const [engineApprovals, setEngineApprovals] = useState<
     { id: string; title: string; reason: string; command?: string }[]
@@ -473,27 +456,27 @@ export function PageAssistant({
      * 却永远不进命令（死参数静默失效）。
      */
     const form: Record<string, string> = {};
-    for (const f of fields ?? []) {
+    for (const f of fieldsRef.current ?? []) {
       if (f.value !== '') form[f.key] = f.value;
     }
     for (const item of list) {
       const k = String((item as Record<string, unknown>).key ?? '');
       if (k) form[k] = String((item as Record<string, unknown>).value ?? '');
     }
+    /* 形态描述：四个条件键的现值拼成一句（拒绝回执与每次回执共用） */
+    const formModeOf = (f: Record<string, string>) =>
+      ['task_type', 'rl_type', 'tuner', 'mode'].map((k) => (f[k] ? `${k}=${f[k]}` : '')).filter(Boolean).join('、');
     for (const item of list) {
       const key = String((item as Record<string, unknown>).key ?? '');
       const to = String((item as Record<string, unknown>).value ?? '');
-      const f = (fields ?? []).find((x) => x.key === key);
+      const f = (fieldsRef.current ?? []).find((x) => x.key === key);
       if (!f) {
         notWritable.push(key);
         continue;
       }
       if (f.active && !f.active(form)) {
-        const formDesc = ['task_type', 'rl_type', 'tuner', 'mode']
-          .filter((k) => form[k])
-          .map((k) => `${k}=${form[k]}`)
-          .join('、');
-        inactive.push(`${key}（需${f.scopeNote ?? '特定表单形态'}；本批应用后：${formDesc || '（空）'}）`);
+        const formDesc = formModeOf(form) || '（空）';
+        inactive.push(`${key}（需${f.scopeNote ?? '特定表单形态'}；本批应用后：${formDesc}）`);
         continue;
       }
       if (f.options && !f.options.includes(to)) {
@@ -511,10 +494,7 @@ export function PageAssistant({
      * 表单形态（本批提议应用后）：模型看不见页面 state，不带的话它只在
      * 撞墙时才能发现表单还停在别的类型。
      */
-    const formMode = ['task_type', 'rl_type', 'tuner', 'mode']
-      .map((k) => (form[k] ? `${k}=${form[k]}` : ''))
-      .filter(Boolean)
-      .join('、');
+    const formMode = formModeOf(form);
     const notes: string[] = [];
     if (inactive.length) {
       notes.push(
@@ -568,7 +548,7 @@ export function PageAssistant({
       if (!m.actions?.length) continue;
       m.actions.forEach((a, i) => {
         if (m.states?.[i] !== 'pending') return;
-        const target = (fields ?? []).find((f) => f.key === a.key);
+        const target = (fieldsRef.current ?? []).find((f) => f.key === a.key);
         if (target?.apply) {
           target.apply(a.to);
           applied++;
@@ -583,7 +563,7 @@ export function PageAssistant({
                 ...m,
                 states: m.actions.map((a, i) => {
                   if ((m.states?.[i] ?? 'pending') !== 'pending') return m.states?.[i] ?? 'pending';
-                  const target = (fields ?? []).find((f) => f.key === a.key);
+                  const target = (fieldsRef.current ?? []).find((f) => f.key === a.key);
                   return target?.apply ? ('applied' as const) : 'pending';
                 }),
               }
@@ -695,11 +675,9 @@ export function PageAssistant({
     setDraft('');
     const images = [...attachments];
     setAttachments([]);
-    setMessages((ms) => [
-      ...ms,
-      userMessage(text),
-      ...(images.length ? [{ id: messageId(), role: 'user' as const, text: '', images }] : []),
-    ]);
+    /* 单条消息带图（与首页同构）：SSE 的 user 回执按 text 去重才能命中，
+     * 两条拆开发会让正文重复显示一次 */
+    setMessages((ms) => [...ms, { ...userMessage(text), ...(images.length ? { images } : {}) }]);
     /*
      * 提交回合（两种形态同一入口）：执行体在 server（压缩历史、模型流、
      * 工具循环、落盘全在引擎），增量经下方 SSE 订阅进视图；新会话把标题

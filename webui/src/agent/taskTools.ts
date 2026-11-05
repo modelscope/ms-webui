@@ -56,29 +56,6 @@ function evalTaskLine(t: EvalTaskInfo): string {
   return scores ? `${head} · ${scores}（报告 ${t.resultJsonl}）` : head;
 }
 
-/** 创建类工具执行后的回喂文案：模型据此把按钮和后续选择权交代给用户 */
-function createdReply(
-  moduleLabel: string,
-  given: string[],
-  missing: string[],
-  fields?: Record<string, unknown>,
-): string {
-  /*
-   * 无挂起通道（页面不在听、引擎未接）时的诚实回执：不声称按钮会出现，
-   * 附参数载荷由模型转告用户或等页面回合再建。
-   */
-  const payload = JSON.stringify(fields ?? {});
-  const shown = payload.length > 2000 ? `${payload.slice(0, 2000)}…（截断）` : payload;
-  return [
-    `已整理好新建${moduleLabel}的参数${given.length ? `（${given.join('、')}）` : ''}。`,
-    missing.length ? `还没提供的参数：${missing.join('、')}——补齐后用户在对应页面创建时更顺。` : '',
-    '本回合没有页面在听（未出现「前往查看」按钮）；请把上述参数转告用户，由用户在对应页面创建并启动，或等用户打开对话后再创建。',
-    `参数载荷：${shown}`,
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
 export interface CreatedLink {
   /** 目标 New 页的模块（预填通道按模块分键） */
   module: PrefillModule;
@@ -94,12 +71,12 @@ export interface HomeToolOptions {
   /** 触发本轮工具调用的用户原话（进预填载荷，目标页助手用它做需求复述） */
   userRequest: string;
   /*
-   * 创建意图挂起入口（引擎传入）：把 link 上抛给页面渲染「前往查看」按钮
-   * 并挂起等用户决定——点按钮跳转并预填、点「稍后再说」保留意图不阻塞
-   * 后续对话；回传文本即工具结果。页面不在场时挂起等浏览器回来（与审批
-   * 同语义，无超时）。
+   * 创建意图挂起入口（引擎传入，唯一构造方）：把 link 上抛给页面渲染「前往
+   * 查看」按钮并挂起等用户决定——点按钮跳转并预填、点「稍后再说」保留意图
+   * 不阻塞后续对话；回传文本即工具结果。页面不在场时挂起等浏览器回来（与
+   * 审批同语义，无超时）。
    */
-  onPendingCreate?: (link: CreatedLink) => Promise<string>;
+  onPendingCreate: (link: CreatedLink) => Promise<string>;
   /** 发起创建的会话 id：随预填带给目标页，助手加载该会话的 turns 桶续聊 */
   conv?: string;
   /** 发起创建的模型 id：turns 按会话 × 模型分桶，续聊要加载对应桶 */
@@ -108,41 +85,38 @@ export interface HomeToolOptions {
 
 export function homeTools({ userRequest, onPendingCreate, conv, model }: HomeToolOptions): AgentTool[] {
   /* create_* 共用骨架：备好预填载荷 → 挂起上抛创建意图（页面渲染按钮）→
-   * 用户决定后回喂结果。无挂起通道时退为无页面在听的诚实回执。 */
+   * 用户决定后回喂结果（含缺参提示）。 */
   const createTool = (
     name: string,
     module: 'train' | 'eval' | 'export' | 'deploy',
     moduleLabel: string,
     description: string,
     parameters: Record<string, unknown>,
-    toFields: (args: Record<string, unknown>) => { fields: Record<string, unknown>; given: string[]; missing: string[] },
+    toFields: (args: Record<string, unknown>) => { fields: Record<string, unknown>; missing: string[] },
   ): AgentTool =>
     defineTool(
       { type: 'function', function: { name, description, parameters } },
       async (args) => {
-        const { fields, given, missing } = toFields(args);
-        if (onPendingCreate) {
-          const outcome = await onPendingCreate({
-            module,
-            to: `/${module}/new`,
-            label: moduleLabel,
-            payload: {
-              fields,
-              context: {
-                userRequest,
-                ...(conv ? { conv } : {}),
-                ...(model ? { model } : {}),
-              },
+        const { fields, missing } = toFields(args);
+        const outcome = await onPendingCreate({
+          module,
+          to: `/${module}/new`,
+          label: moduleLabel,
+          payload: {
+            fields,
+            context: {
+              userRequest,
+              ...(conv ? { conv } : {}),
+              ...(model ? { model } : {}),
             },
-          });
-          return [
-            outcome,
-            ...(missing.length
-              ? [`还没提供的参数：${missing.join('、')}——用户可以到页面上补填，也可以继续在对话里说。`]
-              : []),
-          ].join('\n');
-        }
-        return createdReply(moduleLabel, given, missing, fields);
+          },
+        });
+        return [
+          outcome,
+          ...(missing.length
+            ? [`还没提供的参数：${missing.join('、')}——用户可以到页面上补填，也可以继续在对话里说。`]
+            : []),
+        ].join('\n');
       },
     );
 
@@ -185,11 +159,6 @@ export function homeTools({ userRequest, onPendingCreate, conv, model }: HomeToo
       };
       return {
         fields,
-        given: [
-          ...(model ? ['模型'] : []),
-          ...(datasets.length ? ['数据集'] : []),
-          ...(Object.keys(params).length ? ['训练旋钮'] : []),
-        ],
         missing: [...(model ? [] : ['模型']), ...(datasets.length ? [] : ['训练数据集'])],
       };
     },
@@ -353,7 +322,6 @@ export function homeTools({ userRequest, onPendingCreate, conv, model }: HomeToo
       };
       return {
         fields,
-        given: [...(modelId ? ['被测模型'] : []), ...(items.length ? ['评测集'] : [])],
         missing: [...(modelId ? [] : ['被测模型']), ...(items.length ? [] : ['评测集'])],
       };
     },
@@ -392,11 +360,6 @@ export function homeTools({ userRequest, onPendingCreate, conv, model }: HomeToo
       };
       return {
         fields,
-        given: [
-          ...(model ? ['底座模型'] : []),
-          ...(typeof args.merge_lora === 'boolean' ? ['合并开关'] : []),
-          ...(quant ? ['量化方式'] : []),
-        ],
         missing: model ? [] : ['底座模型'],
       };
     },
@@ -429,7 +392,7 @@ export function homeTools({ userRequest, onPendingCreate, conv, model }: HomeToo
         ...(Number.isInteger(args.port) ? { port: args.port } : {}),
         ...(gpus.length ? { gpus } : Number.isInteger(gpuCount) && gpuCount > 0 ? { gpuCount } : {}),
       };
-      return { fields, given: model ? ['模型'] : [], missing: model ? [] : ['模型'] };
+      return { fields, missing: model ? [] : ['模型'] };
     },
   );
 
