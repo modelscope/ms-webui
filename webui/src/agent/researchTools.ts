@@ -41,6 +41,7 @@ export const AUTORESEARCH_GUIDE = [
   '## autoresearch 指引',
   '- 访谈四步收敛：①目标与数据现状（原始数据在哪、什么格式）②达标标准量化为 metric——必须机械可执行：冻结的 held-out 评测数据 + 判分方式（evalscope 基准或自定义判分脚本）+ 阈值 + 方向；主观标准就提议 rubric 让用户确认。评测耗时是设计义务：样本量（limit）、评测时机、基准大小都要权衡，宁可小而快。③评测时机三选一：during=训练自带评测省一次起卡（数据量小时）；parallel=有空卡时边训边评看中期趋势；checkpoint=训完对最新 ckpt 评（默认）。④预算（迭代轮数上限）与决策规则：达标收工 / 未达标 Challenger 迭代 / 预算耗尽或平台期上报用户。',
   '- 访谈完成后用 create_research 落研究会话（此后训练期间挂起，事件会自动唤醒你），然后准备第一版数据（预处理脚本 run_script / Challenger 组件），数据就绪后 start_train 首轮训练（会弹一次启动审批）。',
+  '- 训练方式在访谈时与用户对齐，例如 SFT 或偏好对训练（start_train 的 task_type=rl 配 dpo 等，从轨迹或同题多次尝试构造 chosen/rejected）与在线 RL（grpo 等，需 reward 进训练环——orm 通道或 verifier，与研究 metric 是两回事）都在方案空间；研究评测始终训后对 checkpoint 离线做，不要求嵌进训练环。要代码而非命令行时用 swift.dev.recipe 的 run_* 入口（read_skill recipe-guide.md）。',
   '- 回合结束前必须处于三态之一，否则研究会停摆且无人唤醒你：①有后台任务在飞（run_script 脚本 / start_train 训练，终态事件会自动叫醒你）；②审批卡正在等用户点（直接调工具触发，如 start_train——不要用文字说「等用户审批」，那样既不弹卡也不会有任何事件）；③研究已达终态（done / escalated / stopped）并给出总结。需要用户拍板的决策用提问落进回复内容，但本轮能推进的动作（跑脚本、起训练）一律先挂上。启动后台脚本后回合就自然收尾等唤醒——不要留在回合里反复 read_script_log 盯进度，它只用于中途诊断（怀疑跑偏/失败归因）。',
   '- 每轮迭代用 update_research 记 note（改了什么、为什么）并维护 iterations 数组（index/dataVersion/trainTaskId/score 原样带回再加新条目）。事件文本里带的账本信息以服务端为准，改动前先读最新 session。',
   '- metric 用自建判分（metric_kind=custom）时：训练完成事件会把评测交还给你——对最新 checkpoint 用 run_script 跑自己的判分脚本（脚本完成会自动通知），分数写进该迭代的 score，达标与否由你对照阈值判断；evalscope 基准则由平台自动起评。',
