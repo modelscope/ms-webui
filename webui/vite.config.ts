@@ -5872,8 +5872,32 @@ if (req.method === 'POST' && !seg0) {
               res.end(JSON.stringify({ error: 'unknown research session' }));
               return;
             }
+            /*
+             * 预算兜底网：iterations 只经此端点增长（平台评测记分与自建 harness
+             * 手动记分共用），超预算必须在此拦停——只靠评测出分处的检查会被自建
+             * 评测绕过（实测预算 4 跑到 8 轮）。done/stopped 是模型自收的终态不
+             * 动；已 escalated 不重复拦（评测出分处先拦的场景）；用户调大 budget
+             * 续跑时 length 自然回到限内，放行。
+             */
+            let sessionOut = updated;
+            if (
+              updated.status !== 'escalated' &&
+              updated.status !== 'done' &&
+              updated.status !== 'stopped' &&
+              updated.iterations.length >= updated.budget.maxIterations
+            ) {
+              sessionOut =
+                (await mutateResearch(seg0, (s) => {
+                  s.status = 'escalated';
+                })) ?? updated;
+              await pushResearchEvent(
+                seg0,
+                'budget',
+                `预算兜底：迭代已记 ${updated.iterations.length}/${updated.budget.maxIterations} 轮，预算用尽。不要再开新一轮（start_train）；在飞的任务照常跑完，评测结束后读分，向用户总结各轮分数与判断，并用 update_research 补记结论。`,
+              );
+            }
             res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ session: updated }));
+            res.end(JSON.stringify({ session: sessionOut }));
             return;
           }
           /*
