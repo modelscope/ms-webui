@@ -61,29 +61,19 @@ function createdReply(
   moduleLabel: string,
   given: string[],
   missing: string[],
-  hasButton: boolean,
   fields?: Record<string, unknown>,
 ): string {
   /*
-   * hasButton=false（服务端唤醒回合，无 onCreate 上抛通道）时不能声称按钮
-   * 已出现——诚实回执 + 参数载荷，由模型转告用户或等页面回合再建。
+   * 无挂起通道（页面不在听、引擎未接）时的诚实回执：不声称按钮会出现，
+   * 附参数载荷由模型转告用户或等页面回合再建。
    */
-  if (!hasButton) {
-    const payload = JSON.stringify(fields ?? {});
-    const shown = payload.length > 2000 ? `${payload.slice(0, 2000)}…（截断）` : payload;
-    return [
-      `已整理好新建${moduleLabel}的参数${given.length ? `（${given.join('、')}）` : ''}。`,
-      missing.length ? `还没提供的参数：${missing.join('、')}——补齐后用户在对应页面创建时更顺。` : '',
-      '本回合在后台执行（没有页面在听），不会出现「前往查看」按钮；请把上述参数转告用户，由用户在对应页面创建并启动，或等用户打开对话后再创建。',
-      `参数载荷：${shown}`,
-    ]
-      .filter(Boolean)
-      .join('\n');
-  }
+  const payload = JSON.stringify(fields ?? {});
+  const shown = payload.length > 2000 ? `${payload.slice(0, 2000)}…（截断）` : payload;
   return [
-    `已准备好新建${moduleLabel}配置${given.length ? `（${given.join('、')}）` : ''}，回复区出现了「前往查看」按钮。`,
-    missing.length ? `还没提供的参数：${missing.join('、')}——用户可以点按钮到页面上补填，也可以继续在对话里告诉你。` : '',
-    '跳转和启动都由用户自己决定：点按钮去目标页启动，或继续对话调整配置。',
+    `已整理好新建${moduleLabel}的参数${given.length ? `（${given.join('、')}）` : ''}。`,
+    missing.length ? `还没提供的参数：${missing.join('、')}——补齐后用户在对应页面创建时更顺。` : '',
+    '本回合没有页面在听（未出现「前往查看」按钮）；请把上述参数转告用户，由用户在对应页面创建并启动，或等用户打开对话后再创建。',
+    `参数载荷：${shown}`,
   ]
     .filter(Boolean)
     .join('\n');
@@ -103,16 +93,22 @@ export interface CreatedLink {
 export interface HomeToolOptions {
   /** 触发本轮工具调用的用户原话（进预填载荷，目标页助手用它做需求复述） */
   userRequest: string;
-  /** 创建意图上抛入口（ChatPage 传入：存为待挂按钮，用户点击才跳转） */
-  onCreate?: (link: CreatedLink) => void;
+  /*
+   * 创建意图挂起入口（引擎传入）：把 link 上抛给页面渲染「前往查看」按钮
+   * 并挂起等用户决定——点按钮跳转并预填、点「稍后再说」保留意图不阻塞
+   * 后续对话；回传文本即工具结果。页面不在场时挂起等浏览器回来（与审批
+   * 同语义，无超时）。
+   */
+  onPendingCreate?: (link: CreatedLink) => Promise<string>;
   /** 发起创建的会话 id：随预填带给目标页，助手加载该会话的 turns 桶续聊 */
   conv?: string;
   /** 发起创建的模型 id：turns 按会话 × 模型分桶，续聊要加载对应桶 */
   model?: string;
 }
 
-export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOptions): AgentTool[] {
-  /* create_* 共用骨架：备好预填载荷 → 上抛创建意图（页面渲染跳转按钮）→ 回喂说明 */
+export function homeTools({ userRequest, onPendingCreate, conv, model }: HomeToolOptions): AgentTool[] {
+  /* create_* 共用骨架：备好预填载荷 → 挂起上抛创建意图（页面渲染按钮）→
+   * 用户决定后回喂结果。无挂起通道时退为无页面在听的诚实回执。 */
   const createTool = (
     name: string,
     module: 'train' | 'eval' | 'export' | 'deploy',
@@ -125,20 +121,28 @@ export function homeTools({ userRequest, onCreate, conv, model }: HomeToolOption
       { type: 'function', function: { name, description, parameters } },
       async (args) => {
         const { fields, given, missing } = toFields(args);
-        onCreate?.({
-          module,
-          to: `/${module}/new`,
-          label: moduleLabel,
-          payload: {
-            fields,
-            context: {
-              userRequest,
-              ...(conv ? { conv } : {}),
-              ...(model ? { model } : {}),
+        if (onPendingCreate) {
+          const outcome = await onPendingCreate({
+            module,
+            to: `/${module}/new`,
+            label: moduleLabel,
+            payload: {
+              fields,
+              context: {
+                userRequest,
+                ...(conv ? { conv } : {}),
+                ...(model ? { model } : {}),
+              },
             },
-          },
-        });
-        return createdReply(moduleLabel, given, missing, onCreate !== undefined, fields);
+          });
+          return [
+            outcome,
+            ...(missing.length
+              ? [`还没提供的参数：${missing.join('、')}——用户可以到页面上补填，也可以继续在对话里说。`]
+              : []),
+          ].join('\n');
+        }
+        return createdReply(moduleLabel, given, missing, fields);
       },
     );
 

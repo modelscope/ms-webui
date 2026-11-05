@@ -185,6 +185,23 @@ export const LORA_PARAMS: ParamField[] = [
 ];
 
 /*
+ * 在线 RL（grpo/ppo/rft 族）的奖励通道与采样引擎旋钮：至少一条奖励通道
+ * 是 CLI validate 的硬规则（无通道直接 ValueError）；vllm_gpu_memory_
+ * utilization 是 colocate 共卡形态下的一等旋钮（默认 0.9 会把训练显存挤
+ * 爆）。generation_batch_size 控制一批 rollout 的 prompt 数——框架缺省按
+ * 训练批对齐推导（覆盖若干 optimizer step），绝不能回退成整数据集一批
+ * （出过：5000 行 ×8 采样进首批，生成数小时零训练日志、形似挂死）。
+ * 值是规则名或模型 id 混排（空格分隔的 List）；权重/伴随字段
+ * （orm_weights、adapters 族）属长尾，走附加参数直写。
+ */
+export const ONLINE_RL_PARAMS: ParamField[] = [
+  { key: 'orm', label: 'tf.orm', kind: 'list', wide: true, hint: 'tf.ormHint', placeholderKey: 'tf.ormPh' },
+  { key: 'prm', label: 'tf.prm', kind: 'list', wide: true, hint: 'tf.prmHint', placeholderKey: 'tf.prmPh' },
+  { key: 'vllm_gpu_memory_utilization', label: 'tf.vllmGpuMem', kind: 'number', hint: 'tf.vllmGpuMemHint', placeholder: '0.9' },
+  { key: 'generation_batch_size', label: 'tf.genBatch', kind: 'number', hint: 'tf.genBatchHint', placeholderKey: 'tf.genBatchPh' },
+];
+
+/*
  * 各 RL 算法的专有参数（RLConfig 分段镜像，key = flag 名）。只收各段的
  * 头部几个「调了就会明显改变行为」的旋钮；长尾（CHORD、f-divergence、
  * 重要性采样层等）走「将要执行」附加参数直写。注意两个结构事实：
@@ -263,7 +280,53 @@ export const RL_PARAMS: Record<string, ParamField[]> = {
   ],
 };
 
-export const ALL_PARAMS = [...TRAIN_PARAMS.flatMap((g) => g.fields), ...LORA_PARAMS, ...Object.values(RL_PARAMS).flat()];
+export const ALL_PARAMS = [...TRAIN_PARAMS.flatMap((g) => g.fields), ...LORA_PARAMS, ...Object.values(RL_PARAMS).flat(), ...ONLINE_RL_PARAMS];
+
+/*
+ * 当前形态下生效的 ParamField 全集（与页面参数区的渲染条件同源）：
+ * task_type=rl 才带算法专有段、在线族才带奖励通道段、tuner=lora 才带
+ * LoRA 段。AI 提议的生效校验与命令拼装的终态过滤都以它为准——「生效」
+ * 与「页面可见可改」是同一个概念，两处判断不允许各写一份。
+ */
+export function paramFieldsFor(taskType: TaskType, rlType: string, tuner: Tuner): ParamField[] {
+  const online = taskType === 'rl' && ONLINE_RL_TYPES.includes(rlType);
+  return [
+    ...TRAIN_PARAMS.flatMap((g) => g.fields),
+    ...(tuner === 'lora' ? LORA_PARAMS : []),
+    ...(taskType === 'rl' ? (RL_PARAMS[rlType] ?? []) : []),
+    ...(online ? ONLINE_RL_PARAMS : []),
+  ];
+}
+
+/*
+ * 条件生效字段的键全集（RL 各算法 ∪ 在线族 ∪ LoRA）：params KV 会跨
+ * 形态残留（页面切走字段时不回清值），命令拼装时这集合里「不属于当前
+ * 生效面」的键一律丢弃——否则残留 flag 会进命令行，被 CLI 拒绝或静默
+ * 失义。
+ */
+export const SCOPED_PARAM_KEYS: ReadonlySet<string> = new Set([
+  ...Object.values(RL_PARAMS).flat().map((f) => f.key),
+  ...ONLINE_RL_PARAMS.map((f) => f.key),
+  ...LORA_PARAMS.map((f) => f.key),
+]);
+
+/*
+ * 全部 RL 算法专有字段的并集（跨算法按 key 去重，同名键的持有算法
+ * 合并）：AI 可写字段面用恒全集，模型任何回合都看得到全部键；每个键
+ * 的生效判据按持有算法集合判定（beta 属 dpo/kto/orpo/cpo，
+ * num_generations 只有 grpo）。
+ */
+export const RL_PARAM_UNION: { field: ParamField; algos: string[] }[] = (() => {
+  const byKey = new Map<string, { field: ParamField; algos: Set<string> }>();
+  for (const [algo, list] of Object.entries(RL_PARAMS)) {
+    for (const f of list) {
+      const entry = byKey.get(f.key) ?? { field: f, algos: new Set<string>() };
+      entry.algos.add(algo);
+      byKey.set(f.key, entry);
+    }
+  }
+  return [...byKey.values()].map(({ field, algos }) => ({ field, algos: [...algos] }));
+})();
 
 /**
  * 代码模式的默认模板：swift.dev Python 原生 API 的最小可跑样例（LoRA SFT）。

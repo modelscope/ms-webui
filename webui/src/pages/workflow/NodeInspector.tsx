@@ -3,6 +3,7 @@ import { Loader2, Play, RotateCw, X } from 'lucide-react';
 import { cn } from 'cn';
 import { Hint } from '@/components/Hint';
 import { AiChatPanel } from '@/components/AiChatPanel';
+import { EngineApprovalCard } from '@/components/EngineApprovalCard';
 import { SegmentedControl } from '@/components/FormField';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,7 +13,7 @@ import { NODE_TYPES, nodeDefOf, nodeLabel } from './nodeTypes';
 import { OutputPreview, OutputPreviewDialog } from './OutputPreview';
 
 import type { AiAction, FlowMessage } from './aiAssist';
-import { describeAction, makeAiSend, nodeIntro, paramsOf } from './aiAssist';
+import { describeAction, nodeIntro, paramsOf, useFlowAiChat } from './aiAssist';
 import { useT } from '@/i18n';
 import type { MessageKey } from '@/i18n';
 
@@ -55,6 +56,8 @@ export function NodeInspector({
   onParamChange,
   onAction,
   onTabChange,
+  baseConv,
+  model,
 }: {
   node: GraphNode;
   nodes: GraphNode[];
@@ -80,6 +83,10 @@ export function NodeInspector({
   /** AI 提议被应用时上报。面板自己不改图 */
   onAction: (a: AiAction) => void;
   onTabChange: (t: Tab) => void;
+  /** 会话锚点（wf-<flowId>）：与整图助手同一会话同一列，节点级与整图级上下文互通 */
+  baseConv: string;
+  /** 当前模型 id（'' = 无可用模型，发送回落离线剧本）；与整图助手共用一列 */
+  model: string;
 }) {
   const def = nodeDefOf(node) ?? NODE_TYPES[node.type];
   const { t } = useT();
@@ -87,11 +94,23 @@ export function NodeInspector({
   /* 设置里把 AI 关掉时，正停在 AI 页就退回参数页——不拦的话面板下半截是空的 */
   const active: Tab = tab === 'ai' && !aiEnabled ? 'params' : tab;
 
-  const ctx = { node, nodes, edges, presetLabel, running };
-  const [messages, setMessages] = useState<FlowMessage[]>(() => [nodeIntro(node, ctx, t)]);
   const [draft, setDraft] = useState('');
   /* 输出预览的大窗：内容与内嵌版同一个组件，只是舞台更大 */
   const [previewOpen, setPreviewOpen] = useState(false);
+
+  /*
+   * 引擎式会话（与整图抽屉同一 hook 同一列）：回合由 server 引擎执行，
+   * 节点级上下文经 ctx().node 点名。面板自己持会话内消息 state，切节点重置
+   * ——问「这个参数为什么这么设」时，上一个节点的上下文留着只会误导。
+   */
+  const { messages, setMessages, streaming, send, stop, approvals, engineAlways, setEngineAlways, resolveEngineApproval } =
+    useFlowAiChat({
+      baseConv,
+      model,
+      ctx: () => ({ node, nodes, edges, presetLabel, running }),
+      t,
+      onControl: () => undefined,
+    });
 
   // 换节点才重开会话。只认 node.id：拖动节点位置、切 tab 都不该把对话清掉
   useEffect(() => {
@@ -114,21 +133,11 @@ export function NodeInspector({
     sections[sections.length - 1].items.push({ p, i });
   });
 
-  /*
-   * 与整图助手同一条真 LLM 链路（makeAiSend）：system 里点名当前节点让它
-   * 优先答相关问题，```action 提议照样解析成卡片——在单个节点上问「把这个
-   * 调小点」也能直接落成改参数卡片。无可用模型时回落离线剧本。
-   */
-  const aiSend = makeAiSend({
-    ctx: () => ({ node, nodes, edges, presetLabel, running }),
-    t,
-    setMessages,
-  });
-  const send = () => {
+  const sendNow = () => {
     const text = draft.trim();
     if (!text) return;
     setDraft('');
-    void aiSend(text);
+    void send(text);
   };
 
   const handleAction = (msgId: string, index: number, next: 'applied' | 'ignored') => {
@@ -276,18 +285,31 @@ export function NodeInspector({
       )}
 
       {active === 'ai' && (
-        <AiChatPanel
-          messages={messages}
-          describe={(a) => describeAction(a, nodes, t)}
-          draft={draft}
-          onDraftChange={setDraft}
-          onSend={send}
-          onAction={handleAction}
-          confirmBeforeApply={confirmBeforeApply}
-          accent={def.color}
-          suggestions={suggestionsFor(node.type).map((s) => t(s))}
-          placeholder={t('wf.aiPlaceholder', { label: nodeLabel(def, t) })}
-        />
+        <div className="flex min-h-0 flex-1 flex-col">
+          <AiChatPanel
+            messages={messages}
+            describe={(a) => describeAction(a, nodes, t)}
+            draft={draft}
+            onDraftChange={setDraft}
+            onSend={sendNow}
+            onStop={streaming ? stop : undefined}
+            onAction={handleAction}
+            confirmBeforeApply={confirmBeforeApply}
+            accent={def.color}
+            suggestions={suggestionsFor(node.type).map((s) => t(s))}
+            placeholder={t('wf.aiPlaceholder', { label: nodeLabel(def, t) })}
+          />
+          {/* 引擎回合挂起的审批（flow_control 等）：决定后引擎恢复回合 */}
+          {approvals.map((a) => (
+            <EngineApprovalCard
+              key={a.id}
+              approval={a}
+              checked={engineAlways[a.id] === true}
+              onCheck={(v) => setEngineAlways((prev) => ({ ...prev, [a.id]: v }))}
+              onResolve={resolveEngineApproval}
+            />
+          ))}
+        </div>
       )}
       {sessionId && (
         <OutputPreviewDialog

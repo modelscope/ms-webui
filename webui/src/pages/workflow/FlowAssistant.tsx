@@ -3,13 +3,14 @@ import { Bot, Pause, Play, Square } from 'lucide-react';
 import { cn } from 'cn';
 import { Hint } from '@/components/Hint';
 import { Button } from '@/components/ui/button';
+import { SelectInput } from '@/components/FormField';
+import { EngineApprovalCard } from '@/components/EngineApprovalCard';
 import { AiChatPanel } from '@/components/AiChatPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import type { GraphEdge, GraphNode } from './nodeTypes';
 import type { AiAction, FlowMessage } from './aiAssist';
-import { describeAction, flowIntro, makeAiSend } from './aiAssist';
-import { useT } from '@/i18n';
-import type { MessageKey } from '@/i18n';
+import { describeAction, flowIntro, useFlowAiChat } from './aiAssist';
+import { useT, type MessageKey } from '@/i18n';
 
 export type RunState = 'idle' | 'running' | 'paused';
 
@@ -23,7 +24,9 @@ const RUN: Record<RunState, { text: MessageKey; tone: string }> = {
  * 整图 AI 助手抽屉（功能 3）。
  *
  * 跟节点面板的区别不在于界面，而在于上下文：这里的 AiContext 不带 node，
- * 所以 AI 回答的是「这张图」的事——启动、暂停、整体为什么慢。
+ * 所以 AI 回答的是「这张图」的事——启动、暂停、整体为什么慢。回合由
+ * server 引擎执行（useFlowAiChat），动作提议（改参数/加节点/启停）经
+ * 页面工具挂起协议上抛成本页卡片，用户点「应用」才落图。
  *
  * 顶上那排启停按钮是有意放在这里的：AI 提议「暂停」的时候，
  * 用户可以选择点卡片让它代劳，也可以自己按按钮。
@@ -39,6 +42,10 @@ export function FlowAssistant({
   confirmBeforeApply,
   onControl,
   onAction,
+  baseConv,
+  model,
+  modelOptions,
+  onModelChange,
 }: {
   open: boolean;
   onClose: () => void;
@@ -50,11 +57,24 @@ export function FlowAssistant({
   onControl: (op: 'start' | 'pause' | 'resume' | 'stop') => void;
   /** 非控制类提议（改参数、加节点）交给页面处理 */
   onAction: (a: AiAction) => void;
+  /** 会话锚点（wf-<flowId>）：turns 按会话×模型分桶，重开画布续上历史 */
+  baseConv: string;
+  /** 当前模型 id（'' = 无可用模型，发送回落离线剧本） */
+  model: string;
+  modelOptions: { value: string; label: string }[];
+  onModelChange: (id: string) => void;
 }) {
-  const [messages, setMessages] = useState<FlowMessage[]>([]);
   const [draft, setDraft] = useState('');
   const running = runState === 'running';
   const { t } = useT();
+  const { messages, setMessages, streaming, send, stop, approvals, engineAlways, setEngineAlways, resolveEngineApproval } =
+    useFlowAiChat({
+      baseConv,
+      model,
+      ctx: () => ({ nodes, edges, presetLabel, running }),
+      t,
+      onControl,
+    });
 
   // 第一次打开时给一句开场白。之后再开保留上次的对话
   useEffect(() => {
@@ -64,21 +84,11 @@ export function FlowAssistant({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  /*
-   * 真后端优先：有已配置的模型就走流式 LLM（system 注入图上下文，末尾的
-   * ```action 块解析成动作卡片，控制类卡片点了就代用户启停）；一个模型都
-   * 没有时退回离线剧本，页面不空转。发送逻辑与节点面板共用 makeAiSend。
-   */
-  const aiSend = makeAiSend({
-    ctx: () => ({ nodes, edges, presetLabel, running }),
-    t,
-    setMessages,
-  });
-  const send = () => {
+  const sendNow = () => {
     const text = draft.trim();
     if (!text) return;
     setDraft('');
-    void aiSend(text);
+    void send(text);
   };
 
   const handleAction = (msgId: string, index: number, next: 'applied' | 'ignored') => {
@@ -116,8 +126,20 @@ export function FlowAssistant({
           </SheetTitle>
         </SheetHeader>
 
+        {/* 模型选择：引擎回合的执行列（无可用模型时发送回落离线剧本） */}
+        <div className="border-border/60 border-y px-4 py-2.5">
+          <SelectInput
+            value={model}
+            onChange={onModelChange}
+            options={modelOptions}
+            placeholder={t('assistant.noModel')}
+            disabled={!modelOptions.length || streaming}
+            className="text-muted-foreground h-7 w-full gap-1.5 truncate border-0 px-2 text-xs shadow-none"
+          />
+        </div>
+
         {/* 状态条 + 手动启停。AI 能做的事，用户自己也得能做 */}
-        <div className="border-border/60 bg-secondary flex flex-wrap items-center gap-2 border-y px-3.5 py-2.5">
+        <div className="border-border/60 bg-secondary flex flex-wrap items-center gap-2 border-b px-3.5 py-2.5">
           <span className={cn('inline-flex items-center gap-1.5 text-[12.5px]', state.tone)}>
             <span
               className={cn('size-[7px] rounded-full bg-current', running && 'status-dot-live')}
@@ -166,7 +188,8 @@ export function FlowAssistant({
           describe={(a) => describeAction(a, nodes, t)}
           draft={draft}
           onDraftChange={setDraft}
-          onSend={send}
+          onSend={sendNow}
+          onStop={streaming ? stop : undefined}
           onAction={handleAction}
           confirmBeforeApply={confirmBeforeApply}
           suggestions={
@@ -176,6 +199,17 @@ export function FlowAssistant({
           }
           placeholder={t('wf.flowPlaceholder')}
         />
+
+        {/* 引擎回合挂起的审批（flow_control 等）：决定后引擎恢复回合 */}
+        {approvals.map((a) => (
+          <EngineApprovalCard
+            key={a.id}
+            approval={a}
+            checked={engineAlways[a.id] === true}
+            onCheck={(v) => setEngineAlways((prev) => ({ ...prev, [a.id]: v }))}
+            onResolve={resolveEngineApproval}
+          />
+        ))}
       </SheetContent>
     </Sheet>
   );

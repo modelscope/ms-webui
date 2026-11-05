@@ -24,8 +24,8 @@ import { pushRecent } from '@/store/recent';
 import { fsTool } from '@/api/tools';
 import { prefillIntro, usePrefill } from '@/store/prefill';
 import {
-  ALL_PARAMS, CODE_TRAIN_TEMPLATE, EXPO_SERVER_URL, LORA_PARAMS, ONLINE_RL_TYPES, RL_PARAMS, RL_TYPE_OPTIONS,
-  TASK_TYPE_DESC, TRAIN_PARAMS,
+  ALL_PARAMS, CODE_TRAIN_TEMPLATE, EXPO_SERVER_URL, LORA_PARAMS, ONLINE_RL_PARAMS, ONLINE_RL_TYPES,
+  RL_PARAM_UNION, RL_PARAMS, RL_TYPE_OPTIONS, SCOPED_PARAM_KEYS, TASK_TYPE_DESC, TRAIN_PARAMS, paramFieldsFor,
   type ParamField, type TaskType, type Tuner,
 } from '@/config/trainForm';
 import { useT } from '@/i18n';
@@ -454,6 +454,16 @@ export function TrainNewPage() {
     [codeGpuSel, t],
   );
 
+  /*
+   * 当前形态生效的参数键集（paramFieldsFor 与页面渲染条件同源）：params KV
+   * 跨形态残留（页面切走字段时不回清值），命令预览与提交两处统一丢弃
+   * 「条件键里不属于当前生效面」的——否则残留 flag 会进命令行，被 CLI
+   * 拒绝或静默失义（AI 恒全集可写面让这类残留更容易出现，终态过滤是它
+   * 的对侧闸门）。
+   */
+  const effectiveKeys = new Set(paramFieldsFor(taskType, rlType, tuner).map((f) => f.key));
+  const dropScoped = (k: string) => SCOPED_PARAM_KEYS.has(k) && !effectiveKeys.has(k);
+
   const preview = useMemo(() => {
     /* rl 的算法以 --rl_type 携带（params 的 key 就是 flag 名），sft/pt 无此项 */
     const effectiveParams: Record<string, string | number | boolean> =
@@ -476,7 +486,14 @@ export function TrainNewPage() {
       ...(isOnlineRl && rlInfo.valid ? [`--sampler_mode ${rlPlacement.placement}`] : []),
       /* 并行计划 flag（弹窗实时调节写回）：后端选择与各组 spec / vllm 引擎形状 */
       ...Object.entries(planFlagMap).map(([k, v]) => `--${k} ${v}`),
-      ...Object.entries(effectiveParams).map(([k, v]) => `--${k} ${v}`),
+      /* 运行位置字段与实际拼装同源过滤（见后端 buildTrainArgs）：异 mode 的残留值不进预览 */
+      ...Object.entries(effectiveParams).flatMap(([k, v]) => {
+        /* 终态过滤（与提交同源）：非当前形态的残留键不进预览，预览即命令 */
+        if (dropScoped(k)) return [];
+        if ((k === 'server_base_url' || k === 'server_api_key') && effectiveParams.mode !== 'remote') return [];
+        if (k === 'ray_exp_name' && effectiveParams.mode !== 'ray') return [];
+        return [`--${k} ${v}`];
+      }),
       ...(extraArgs.trim() ? [extraArgs.trim()] : []),
       t('tn.cmdOutputDir'),
     ];
@@ -491,7 +508,12 @@ export function TrainNewPage() {
   }, [model, taskType, rlType, datasets, valDatasets, tuner, plugins, nproc, params, extraArgs, gpuSel, launch, token,
     isOnlineRl, rlPlacement, planFlagMap, t]);
 
-  const submit = async () => {
+  /*
+   * 提交：失败时返回原因文案（供 AI 助手的 submit_form 回喂模型，它能据此
+   * 自治修正后重提）；null = 成功。页面侧的拦截点与 CLI 校验同源（GRPO
+   * 必须有奖励通道是 CLI validate 的硬规则，前移到提交门省一次 spawn）。
+   */
+  const submit = async (): Promise<string | null> => {
     /*
      * 代码形态：唯一校验是非空——内容对错由解释器与 swift.dev 报错。
      * 用户在页面点「启动」即执行（与命令行训练同级信任），无额外审批。
@@ -499,7 +521,7 @@ export function TrainNewPage() {
     if (mode === 'code') {
       if (!code.trim()) {
         toast.error(t('tn.errCodeEmpty'));
-        return;
+        return t('tn.errCodeEmpty');
       }
       setSubmitting(true);
       try {
@@ -516,28 +538,43 @@ export function TrainNewPage() {
         navigate('/train');
       } catch (e) {
         toast.error(String(e));
+        return String(e);
       } finally {
         setSubmitting(false);
       }
-      return;
+      return null;
     }
     if (!model.trim()) {
       toast.error(t('tn.errModel'));
-      return;
+      return t('tn.errModel');
     }
     if (!datasets.length) {
       toast.error(t('tn.errDataset'));
-      return;
+      return t('tn.errDataset');
     }
     /* 在线 RL：双组配卡不合法（未填/超卡数/不能整分）时拒绝提交并点名原因 */
     if (isOnlineRl && !rlInfo.valid) {
       toast.error(rlInfo.error ?? t('tn.errRlFirst'));
-      return;
+      return rlInfo.error ?? t('tn.errRlFirst');
+    }
+    /*
+     * GRPO 无奖励通道：CLI validate 必拒（ValueError: needs at least one
+     * reward channel），前移到提交门——否则 spawn 后才 traceback，AI 侧
+     * 还拿不到失败原因只能瞎猜。
+     */
+    if (
+      taskType === 'rl' &&
+      rlType === 'grpo' &&
+      !String(params.orm ?? '').trim() &&
+      !String(params.prm ?? '').trim()
+    ) {
+      toast.error(t('tn.errNoReward'));
+      return t('tn.errNoReward');
     }
     /* 展览模式的独占校验：remote 凭据来自登录会话，没登录就没有可用的 server token */
     if (launch === 'expo' && !token) {
       toast.error(t('tn.errLoginExpo'));
-      return;
+      return t('tn.errLoginExpo');
     }
     setSubmitting(true);
     try {
@@ -551,6 +588,10 @@ export function TrainNewPage() {
           : token && params.mode === 'remote'
             ? { ...params, server_api_key: token }
             : params;
+      /* 终态过滤（与命令预览同源）：非当前形态的残留键不随任务落盘 */
+      const filteredParams = Object.fromEntries(
+        Object.entries(submitParams).filter(([k]) => !dropScoped(k)),
+      );
       const id = await startTrain({
         model: model.trim(),
         taskType,
@@ -562,7 +603,7 @@ export function TrainNewPage() {
         ...(taskType === 'rl'
           ? {
               params: {
-                ...submitParams,
+                ...filteredParams,
                 rl_type: rlType,
                 /* 在线 RL 的双组放置 flag（与命令预览同源） */
                 ...(isOnlineRl && rlInfo.valid ? { sampler_mode: rlPlacement.placement } : {}),
@@ -570,7 +611,7 @@ export function TrainNewPage() {
                 ...planFlagMap,
               },
             }
-          : { params: submitParams }),
+          : { params: filteredParams }),
         ...(extraArgs.trim() ? { extraArgs: extraArgs.trim() } : {}),
         ...(watchMetrics.length ? { watchMetrics } : {}),
         /* 展览模式不占本机卡（训练在远端 server 上跑） */
@@ -589,19 +630,123 @@ export function TrainNewPage() {
       });
       toast.success(t('tn.started'));
       navigate('/train');
+      return null;
     } catch (e) {
       toast.error(String(e));
+      return String(e);
     } finally {
       setSubmitting(false);
     }
   };
 
-  /* 交给 AI 助手的字段 */
+  /*
+   * 交给 AI 助手的字段（恒全集）：结构化核心项 + 参数注册表的全部键。
+   * 页面只渲染当前形态生效的字段，但 AI 的可写面不随形态裁剪——pageTools
+   * 的 schema 是回合级快照，按形态裁剪会让模型在切换前判断「字段不在清单
+   * 里」而连试都不试（出过：让用户先手动点两张切换卡再回来补配，一次配置
+   * 拆成两轮往返）。生效性由 active 判据表达：提议校验按「本批应用后」的
+   * 虚拟形态评估，不满足时回执点名缺什么条件字段。task_type/rl_type 必须
+   * 在列（否则模型切算法时会把算法名写进 tuner 等不相干枚举字段，出过：
+   * grpo 写进训练方式）；password 类（server 凭据）不给 AI；bool 字段以
+   * true/false 枚举表达，应用时转回布尔。命令拼装的终态过滤（dropScoped）
+   * 与这里的恒全集互为对侧：什么都能写，但只有生效形态下的值进命令。
+   */
+  const paramCfg = (
+    f: ParamField,
+    active?: ConfigField['active'],
+    scopeNote?: string,
+  ): ConfigField => ({
+    key: f.key,
+    label: `${f.key}（${t(f.label)}）`,
+    value: String(params[f.key] ?? ''),
+    ...(f.kind === 'bool'
+      ? { options: ['true', 'false'] as const }
+      : f.kind === 'select' && f.options
+        ? { options: f.options.map((o) => o.value) }
+        : {}),
+    ...(active ? { active } : {}),
+    ...(scopeNote ? { scopeNote } : {}),
+    apply: (v: string) => setParam(f.key, f.kind === 'bool' ? v === 'true' : v),
+  });
+  /* 在线族判据与条件说明：sampler_mode / 奖励通道 / vLLM 显存占比共用 */
+  const onlineRlActive = (v: Record<string, string>) => v.task_type === 'rl' && ONLINE_RL_TYPES.includes(v.rl_type ?? '');
+  const ONLINE_RL_SCOPE = 'task_type=rl 且 rl_type 为在线族（grpo/ppo/rft/gkd/opsd/mopd）';
   const fields: ConfigField[] = [
+    { key: 'task_type', label: 'task_type（任务类型）', value: taskType, options: ['sft', 'pt', 'rl'], apply: (v) => setTaskType(v as TaskType) },
+    /* 与页面算法选择器同一条链路（changeRlType 连带清算法残留值） */
+    { key: 'rl_type', label: 'rl_type（RL 算法，task_type=rl 时生效）', value: rlType, options: RL_TYPE_OPTIONS.flatMap((g) => g.items.map((i) => i.value)), apply: changeRlType },
     { key: 'model', label: t('tn.modelLabel'), value: model, apply: setModel },
     { key: 'dataset', label: t('tn.fDataset'), value: datasets.join(' '), apply: (v) => setDatasets(v.split(/[\s,]+/).filter(Boolean)) },
-    { key: 'tuner', label: t('tn.tunerLabel'), value: tuner, apply: (v) => setTuner(v as Tuner) },
-    { key: 'learning_rate', label: t('tf.lr'), value: String(params.learning_rate ?? ''), apply: (v) => setParam('learning_rate', v) },
+    { key: 'tuner', label: t('tn.tunerLabel'), value: tuner, options: ['lora', 'full', 'trainable_tokens'], apply: (v) => setTuner(v as Tuner) },
+    { key: 'external_plugins', label: 'external_plugins（插件文件/目录/hub id，多个用空格分隔）', value: plugins.join(' '), apply: (v) => setPlugins(v.split(/[\s,]+/).filter(Boolean)) },
+    /*
+     * 显卡与 RL 放置：AI 只写两个粗粒度旋钮（卡号/卡数、colocate/独立分片），
+     * parallel_spec/分段串不用它写——卡数或放置变化时既有自愈链会把失配的
+     * 段串重置为默认分配；精细 mesh 维度仍归「显卡与分片分组」弹窗。
+     * 不接这两项时 AI 改了 task_type=rl 而卡池不变，校验报「合计 N 张超出
+     * 可用 M 张」它也救不了（GpuPicker/rlPlacement 都不在它可写面里）。
+     */
+    {
+      key: 'gpus',
+      label: `gpus（${gpuSel.mode === 'local' ? '本机卡号，逗号分隔，如 0,2,3；避开被占用的卡' : '集群卡数'}）`,
+      value: gpuSel.mode === 'local' ? gpuSel.cards.join(',') : String(gpuSel.count ?? ''),
+      apply: (v) => {
+        const nums = v.split(/[\s,]+/).map(Number).filter(Number.isInteger);
+        setGpuSel(
+          gpuSel.mode === 'cluster'
+            ? { mode: 'cluster', cards: [], count: nums[0] }
+            : { mode: 'local', cards: nums, count: undefined },
+        );
+      },
+    },
+    {
+      key: 'sampler_mode',
+      label: 'sampler_mode（RL 放置：colocate=采样器与训练同卡；disaggregated=独立分片，至少 2 张卡）',
+      value: rlPlacement.placement,
+      options: ['colocate', 'disaggregated'] as const,
+      active: onlineRlActive,
+      scopeNote: ONLINE_RL_SCOPE,
+      apply: (v: string) => setRlPlacement((prev) => ({ ...prev, placement: v as RlPlacement['placement'] })),
+    },
+    /*
+     * 奖励通道与 vLLM 显存占比（与页面奖励通道区同源）：GRPO 必须至少
+     * 一条奖励通道（CLI 校验 fail-loud，提交门也拦）。组规划 (deriveGroups)
+     * 读 params.orm/prm 展开奖励组；规则名清单来自 ormRules 注册表探测，
+     * 也可写模型 id（每 id 独占一组）——候选拼进 label 给模型看。
+     */
+    ...ONLINE_RL_PARAMS.map((f) => ({
+      ...paramCfg(f, onlineRlActive, ONLINE_RL_SCOPE),
+      label:
+        f.key === 'orm'
+          ? `orm（${t('tf.orm')}；grpo 必须至少一条。规则注册表：${ormRules.orm.join(' ') || '（探测中，可用 accuracy 等内置规则）'}）`
+          : f.key === 'prm'
+            ? `prm（${t('tf.prm')}；可选，可与 orm 并存）`
+            : 'vllm_gpu_memory_utilization（colocate 下 vLLM 占卡显存比例；默认 0.9 会挤爆共卡训练，建议 0.5）',
+    })),
+    /*
+     * 通用与 LoRA/RL 专有参数：运行位置字段（server_base_url、ray_exp_name）的
+     * 生效条件挂 active（mode 值判据）而非从可写面剔除——剔除会让模型
+     * 「同批切 mode=remote + 填 server_base_url」时后者在清单里找不到，
+     * 又是快照滞后那类两轮往返。
+     */
+    ...TRAIN_PARAMS.flatMap((g) => g.fields)
+      .filter((f) => f.kind !== 'password')
+      .map((f) =>
+        f.key === 'server_base_url'
+          ? paramCfg(f, (v) => v.mode === 'remote', 'mode=remote')
+          : f.key === 'ray_exp_name'
+            ? paramCfg(f, (v) => v.mode === 'ray', 'mode=ray')
+            : paramCfg(f),
+      ),
+    ...LORA_PARAMS.map((f) => paramCfg(f, (v) => v.tuner === 'lora', 'tuner=lora')),
+    /* RL 专有参数的全算法并集：生效判据 = 任一持有算法被选中 */
+    ...RL_PARAM_UNION.map(({ field, algos }) =>
+      paramCfg(
+        field,
+        (v) => v.task_type === 'rl' && algos.includes(v.rl_type ?? ''),
+        `task_type=rl 且 rl_type ∈ {${algos.join('/')}}`,
+      ),
+    ),
   ];
 
   const paramInput = (f: ParamField) => {
@@ -618,15 +763,19 @@ export function TrainNewPage() {
       );
     }
     if (f.kind === 'list') {
-      /* List[str] 型 flag（teacher_model）：值以空格 join 存 params，chip 输入 */
+      /*
+       * List[str] 型 flag：值以空格 join 存 params，chip 输入。候选按字段给：
+       * orm/prm 用奖励规则注册表（模型 id 走自由输入），teacher_model 用模型清单。
+       */
       const vals = typeof value === 'string' ? value.split(/\s+/).filter(Boolean) : [];
+      const ruleCandidates = f.key === 'orm' || f.key === 'prm' ? (ormRules[f.key] ?? []) : [];
       return (
         <Field label={t(f.label)} hint={f.hint && t(f.hint)}>
           <TagInput
             values={vals}
             onChange={(vs) => setParam(f.key, vs.join(' '))}
-            options={modelOptions}
-            placeholder={t('tn.teacherPh')}
+            options={ruleCandidates.length ? ruleCandidates.map((r) => ({ value: r, label: r })) : modelOptions}
+            placeholder={f.placeholderKey ? t(f.placeholderKey) : t('tn.teacherPh')}
           />
         </Field>
       );
@@ -853,6 +1002,15 @@ export function TrainNewPage() {
                   {paramGrid(RL_PARAMS[rlType])}
                 </>
               )}
+              {/* 奖励通道（在线族）：GRPO 必须至少一条是 CLI 硬校验，缺了提交门也会拦 */}
+              {isOnlineRl && (
+                <>
+                  <div className="text-muted-foreground/80 mt-3.5 mb-2.5 text-[11px] font-medium tracking-[0.08em] uppercase">
+                    {t('tn.rewardChannel')}
+                  </div>
+                  {paramGrid(ONLINE_RL_PARAMS)}
+                </>
+              )}
             </div>
           )}
         </FieldStack>
@@ -1073,7 +1231,7 @@ export function TrainNewPage() {
         </Button>
       }
       sections={mode === 'code' ? codeSections : [modeSection, ...cliSections]}
-      onSubmit={() => void submit()}
+      onSubmit={() => submit()}
       assistantAutoOpen={Boolean(prefill?.context)}
       assistantIntro={prefill?.context ? prefillIntro('训练', prefill) : undefined}
       assistantConv={prefill?.context?.conv}

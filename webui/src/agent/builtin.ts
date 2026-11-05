@@ -489,6 +489,19 @@ export function workspaceTools(conv?: string, modelId?: string): AgentTool[] {
 }
 
 /**
+ * 配置页（新建页助手）专用的精简指引：填表场景窄，不需要工作台 guide
+ * 里数据探查/后台脚本/插件那套——指令量大会把推理模型推入「连环查证」
+ * 模式（长思考 + 翻源码），而这里 90% 的问题应该直接答。不注入
+ * read_swift_source 的引导：CLI 参数细节 skills 的 cli-reference.md 已覆盖。
+ */
+export const CONFIG_ASSISTANT_GUIDE = [
+  '## 配置助手行动指引',
+  '- 填表问题先直接回答（起手值、字段含义、二选一建议都不要查工具）；需要参数细节时用 read_skill 查技能文档（swift-usage 的 cli-reference.md 列了 CLI 全参数），不要翻安装源码。',
+  '- 环境事实（GPU 清单、swift/evalscope 版本、python 解释器）用 env_info 一次拿全，不要逐项探测。',
+  '- 答案拿不准才查一次文档；查了还拿不准就如实告诉用户，不要连环查证。',
+].join('\n');
+
+/**
  * 工作台行动指引（常驻注入）：把「swift 怎么用、数据集哪里找、模型谁定、
  * 卡数怎么定分片」这四类高频问题的正确入口一次性交代清楚——没有这段时
  * 模型会拿 swift --help、nvidia-smi、翻源码这类命令自己找路，每条都要审批。
@@ -618,6 +631,57 @@ export function listCatalogTool(): AgentTool {
       } catch (e) {
         return `注册表读取失败: ${String(e instanceof Error ? e.message : e)}`;
       }
+    },
+  );
+}
+
+/**
+ * 模型 id 解析工具：search_models。用户口语/简称（如 "qwen3.5-4b"）→ 分词
+ * AND 匹配目录里的真实 hub id。各 New 页配置助手与主对话共用一份目录与同一条
+ * 解析路；查不到时回喂建议换短关键词或向用户确认，不把原话直接当 id。
+ */
+export function searchModelsTool(): AgentTool {
+  return defineTool(
+    {
+      type: 'function',
+      function: {
+        name: 'search_models',
+        description:
+          '按关键词搜索可用模型目录（hub id 清单，来自 swift MODEL_MAPPING 注册表）。' +
+          '用户用口语或简称说模型（如 "qwen3.5-4b"）时，先用它解析出真实 hub id 再写入 model 字段；' +
+          '查不到就换更短的关键词重试，仍查不到则向用户确认，不要把用户原话直接当 id',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: '关键词（名称片段，可多个词，如 "qwen3.5 4b"）' },
+          },
+          required: ['query'],
+        },
+      },
+    },
+    async (args) => {
+      const query = String(args.query ?? '').toLowerCase().trim();
+      const words = query.split(/[\s\-_/]+/).filter(Boolean);
+      if (!words.length) return '空关键词。';
+      let models: CatalogEntry[];
+      try {
+        ({ models } = await listCatalog());
+      } catch {
+        return '模型目录暂不可达，请向用户确认完整 hub id。';
+      }
+      /* 分词 AND 匹配（大小写无关）：每个词都要出现在 id 里 */
+      const hits = models
+        .filter((m) => {
+          const id = m.id.toLowerCase();
+          return words.every((w) => id.includes(w));
+        })
+        .slice(0, 20);
+      if (!hits.length) {
+        return `目录里没有匹配 "${query}" 的模型；换更短的关键词（如只写家族名）重试，或向用户确认完整 hub id。`;
+      }
+      return `匹配到 ${hits.length} 个（最多列 20）：\n${hits
+        .map((m) => `- ${m.id}${m.modelType ? `（${m.modelType}）` : ''}${m.cached ? '（本机已缓存）' : ''}`)
+        .join('\n')}`;
     },
   );
 }

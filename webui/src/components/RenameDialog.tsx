@@ -65,7 +65,8 @@ export function RenameDialog({
           autoFocus
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            /* 输入法组词中的 Enter 是选字，不当确认 */
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
               e.preventDefault();
               void confirm();
             }

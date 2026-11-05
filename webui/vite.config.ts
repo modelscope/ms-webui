@@ -1823,9 +1823,15 @@ function buildTrainArgs(task: Omit<TrainTask, 'args' | 'status' | 'startedAt' | 
      * 值里带空格 = List[str] 型 flag 的多值（如 --teacher_model A B，前端把
      * 多个教师以空格 join 进一个 string）——拆成多个 argv 交给 HfArgumentParser
      * 的 nargs 解析；标量 flag 的值本来就不该含空格，含了也是错的。
+     *
+     * 运行位置字段只对各自 mode 有意义（server_* 服务 remote、ray_exp_name
+     * 服务 ray）：params 里残留的异 mode 值（如本地模式下写过的 server
+     * 地址）照拼会产出 CLI 容忍但误导排查的脏 flag。与页面字段展示条件同源。
      */
     ...Object.entries(task.params).flatMap(([k, v]) => {
       if (v === '' || v === false) return [];
+      if ((k === 'server_base_url' || k === 'server_api_key') && task.params.mode !== 'remote') return [];
+      if (k === 'ray_exp_name' && task.params.mode !== 'ray') return [];
       const parts = String(v).split(/\s+/).filter(Boolean);
       return ['--' + k, ...parts];
     }),
@@ -6087,6 +6093,7 @@ if (req.method === 'POST' && !seg0) {
               images?: unknown;
               system?: unknown;
               tools?: unknown;
+              pageTools?: unknown;
               title?: unknown;
               sampling?: unknown;
               noApproval?: unknown;
@@ -6096,6 +6103,44 @@ if (req.method === 'POST' && !seg0) {
             const system = Array.isArray(body.system) ? body.system.filter((s): s is string => typeof s === 'string') : [];
             const tools = Array.isArray(body.tools) ? body.tools.filter((t): t is string => typeof t === 'string') : [];
             const images = Array.isArray(body.images) ? body.images.filter((i): i is string => typeof i === 'string') : undefined;
+            /*
+             * 页面动态工具定义：形状逐条校验（name/description 非空串、parameters
+             * 对象、approval 可选且 title/reason 为串）；与注册表名撞车直接 400——
+             * 引擎按 pageTools 名构建工具，撞名会与注册表工具重叠不可区分。
+             */
+            const pageTools = Array.isArray(body.pageTools)
+              ? body.pageTools
+                  .filter((p): p is Record<string, unknown> => Boolean(p) && typeof p === 'object')
+                  .map((p) => {
+                    const name = typeof p.name === 'string' ? p.name.trim() : '';
+                    const description = typeof p.description === 'string' ? p.description : '';
+                    const parameters =
+                      p.parameters && typeof p.parameters === 'object' ? (p.parameters as Record<string, unknown>) : null;
+                    if (!name || !description || !parameters) return null;
+                    const approvalRaw =
+                      p.approval && typeof p.approval === 'object' ? (p.approval as { title?: unknown; reason?: unknown }) : null;
+                    const approval =
+                      approvalRaw && typeof approvalRaw.title === 'string' && typeof approvalRaw.reason === 'string'
+                        ? { title: approvalRaw.title, reason: approvalRaw.reason }
+                        : undefined;
+                    return { name, description, parameters, ...(approval ? { approval } : {}) };
+                  })
+                  .filter((p): p is NonNullable<typeof p> => p !== null)
+              : undefined;
+            if (pageTools?.length) {
+              if (pageTools.some((p) => tools.includes(p.name) || p.name === 'create_link')) {
+                res.statusCode = 400;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'page tool 名与注册表工具名冲突' }));
+                return;
+              }
+              if (JSON.stringify(pageTools).length > 100_000) {
+                res.statusCode = 400;
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ error: 'pageTools 体积超限' }));
+                return;
+              }
+            }
             const sampling =
               body.sampling && typeof body.sampling === 'object'
                 ? (body.sampling as { temperature?: number; topP?: number; maxTokens?: number })
@@ -6117,6 +6162,7 @@ if (req.method === 'POST' && !seg0) {
               ...(images?.length ? { images } : {}),
               system,
               tools,
+              ...(pageTools?.length ? { pageTools } : {}),
               ...(typeof body.title === 'string' ? { title: body.title } : {}),
               ...(sampling ? { sampling } : {}),
               ...(apiKey ? { apiKey } : {}),
@@ -6211,6 +6257,43 @@ if (req.method === 'POST' && !seg0) {
             }
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (req.method === 'POST' && segs[1] === 'page-tool') {
+            /*
+             * 页面回传挂起工具的执行结果：消毒（特殊 token 打断 + 20k 截断）后
+             * 交给引擎续轮。展览模式与其它会话端点同口径允许（工具结果不落盘
+             * 本机，只进回合内存/上游模型）。
+             */
+            const body = (await readJsonBody(req)) as { model?: unknown; callId?: unknown; result?: unknown };
+            const model = typeof body.model === 'string' ? body.model : '';
+            const callId = typeof body.callId === 'string' ? body.callId : '';
+            if (!model || !callId) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'model 与 callId 必填' }));
+              return;
+            }
+            const raw = typeof body.result === 'string' ? body.result : '';
+            const result = raw.replace(SPECIAL_TOKEN_RE, (m) => `<\u200b${m.slice(1)}`).slice(0, 20_000);
+            const ok = engine?.resolvePageTool(conv, model, callId, result) === true;
+            if (!ok) {
+              res.statusCode = 404;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'unknown callId' }));
+              return;
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (req.method === 'GET' && segs[1] === 'page-tools') {
+            /* 挂起中的页面工具调用（面板挂载/SSE 重连后恢复重放用）；不给 model 返回该会话全部列（带列名） */
+            const url = new URL(req.url ?? '/', 'http://local');
+            const model = url.searchParams.get('model') ?? undefined;
+            const calls = engine?.listPendingPageTools(conv, model) ?? [];
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ calls }));
             return;
           }
           if (req.method === 'DELETE') {

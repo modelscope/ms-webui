@@ -17,6 +17,7 @@ import { DEFAULT_PRESET, PRESETS, clonePreset } from './presets';
 import { getWorkflowLog, getWorkflowSession, getWorkflowSessionByKey, pauseWorkflowRun, releaseWorkflowSession, resumeWorkflowRun, startWorkflowRun, stopWorkflowRun } from '../../api/workflow';
 import type { WorkflowEvent, WorkflowResourceDecl, WorkflowRunSubmission, WorkflowSessionSnapshot } from '../../api/workflow';
 import { createFlow, getFlow, saveFlow } from '../../api/flows';
+import { listModels, type ModelConfig } from '../../api/models';
 
 import { CodeBlock } from '@/components/CodeBlock';
 import { LogViewer } from '@/components/LogViewer';
@@ -163,6 +164,25 @@ export function WorkflowEditorPage() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('params');
   const [assistantOpen, setAssistantOpen] = useState(false);
+  /*
+   * 拖拽页 AI 会话（整图抽屉与节点面板共用）：模型列表 mount 拉一次，列由
+   * 用户选；会话锚点按 flow 实验固定（wf-<flowId>）——重开画布续上历史图
+   * 对话，turns 按会话×模型分桶。未保存实验（无 flowId）首发建临时会话。
+   */
+  const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([]);
+  const [aiModel, setAiModel] = useState('');
+  useEffect(() => {
+    listModels()
+      .then((configs) => {
+        setModelConfigs(configs);
+        setAiModel((prev) => prev || configs[0]?.id || '');
+      })
+      .catch(() => {
+        /* 模型清单不可达：AI 面板显示无可用模型，发送回落离线剧本 */
+      });
+  }, []);
+  const aiBaseConv = flowId ? `wf-${flowId}` : '';
+  const aiModelOptions = modelConfigs.map((m) => ({ value: m.id, label: m.id }));
   const [runState, setRunState] = useState<RunState>('idle');
   /**
    * 当前常驻会话 id（vite 会话表的键）。run 结束后仍保留：输出页的 preview
@@ -1003,6 +1023,8 @@ export function WorkflowEditorPage() {
               confirmBeforeApply={settings.aiConfirmBeforeApply}
               tab={inspectorTab}
               sessionId={runId ?? undefined}
+              baseConv={aiBaseConv}
+              model={aiModel}
               onClose={() => setInspectorOpen(false)}
               onRun={runNode}
               onParamChange={setParamAt}
@@ -1086,6 +1108,10 @@ export function WorkflowEditorPage() {
         confirmBeforeApply={settings.aiConfirmBeforeApply}
         onControl={control}
         onAction={applyAction}
+        baseConv={aiBaseConv}
+        model={aiModel}
+        modelOptions={aiModelOptions}
+        onModelChange={setAiModel}
       />
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>

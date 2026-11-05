@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Bot, Info, TriangleAlert } from 'lucide-react';
 import { Hint } from './Hint';
 import { PageHeader } from './PageHeader';
+import { Column } from './Column';
 import { Panel } from './TaskDetailShell';
 import { Button } from './ui/button';
 import { PageAssistant, type ConfigField } from './PageAssistant';
@@ -67,8 +68,8 @@ export function ConfigFormShell({
   assistantConv?: string;
   /** 发起创建的模型 id：续聊加载该模型的 turns 桶 */
   assistantModel?: string;
-  /** 真实提交动作：提供时助手获得 submit_form 工具（heavy 审批后触发） */
-  onSubmit?: () => void | Promise<void>;
+  /** 真实提交动作：提供时助手获得 submit_form 工具（heavy 审批后触发）。返回 string = 失败原因（回喂模型）；null/undefined = 成功 */
+  onSubmit?: () => string | null | undefined | Promise<string | null | undefined>;
 }) {
   const navigate = useNavigate();
   const { settings } = useSettings();
@@ -115,58 +116,61 @@ export function ConfigFormShell({
         }
       />
 
-      {/* items-start：右边预览要 sticky，父容器一拉伸就粘不住了 */}
-      <div className="flex items-start gap-5 px-6 pt-1 pb-8">
-        <div className="flex min-w-0 flex-1 flex-col gap-4">
-          {warning && (
-            <div className="border-state-paused/25 bg-state-paused/8 text-foreground flex items-start gap-2.5 rounded-md border px-3.5 py-2.5 text-[13px] leading-5">
-              <TriangleAlert size={14} className="text-state-paused mt-0.5 flex-none" />
-              {warning}
-            </div>
-          )}
-          {sections.map((s) => (
-            <Panel key={s.title} title={s.title} extra={s.extra}>
-              {s.content}
-            </Panel>
-          ))}
-        </div>
-
-        <div className="sticky top-4 w-[420px] flex-none">
-          <Panel title={t('shell.willRun')}>
-            {/*
-              这里 whitespace-pre-wrap 而不是横向滚动：预览是「读」的，
-              命令太长时折行看得见全部内容比拖横条更有用；要复制的是任务目录里
-              那份真的 run.sh，不是这段预览。
-            */}
-            <div className="bg-muted text-foreground max-h-[420px] overflow-auto rounded-md p-3 font-mono text-xs leading-[19px] break-all whitespace-pre-wrap">
-              {preview}
-            </div>
-            {extraArgs !== undefined && onExtraArgsChange && (
-              <div className="mt-3 border-t pt-3">
-                <div className="text-foreground mb-1.5 text-[13px] font-medium">{t('shell.extraArgs')}</div>
-                {/*
-                  表单没暴露的 CLI 参数直接写在这里，提交时原样追加到命令行。
-                  用 textarea：参数值常带空格，一行放不下时折行可见。
-                */}
-                <textarea
-                  value={extraArgs}
-                  rows={2}
-                  placeholder={t('shell.extraArgsPlaceholder')}
-                  className="border-border bg-background text-foreground placeholder:text-muted-foreground w-full resize-y rounded-md border px-2.5 py-1.5 font-mono text-xs leading-5 outline-none focus-visible:border-ring/40"
-                  onChange={(e) => onExtraArgsChange(e.target.value)}
-                />
-                <div className="text-muted-foreground mt-1.5 text-[11px] leading-4">
-                  {t('shell.extraArgsFormat')}
-                </div>
+      {/* 正文与页头同一条 Column（wide 1240 + px-8）：标题、警告条、分区卡片
+          的左缘严格对齐——差 1px 都看得出来，宽度规则只有 Column 一个出处 */}
+      <Column wide className="pt-1 pb-8">
+        <div className="flex items-start gap-5">
+          <div className="flex min-w-0 flex-1 flex-col gap-4">
+            {warning && (
+              <div className="border-state-paused/25 bg-state-paused/8 text-foreground flex items-start gap-2.5 rounded-md border px-3.5 py-2.5 text-[13px] leading-5">
+                <TriangleAlert size={14} className="text-state-paused mt-0.5 flex-none" />
+                {warning}
               </div>
             )}
-            <div className="text-muted-foreground mt-2.5 flex items-start gap-2 text-xs leading-[18px]">
-              <Info size={13} className="mt-0.5 flex-none" />
-              {t('shell.runScriptHint')}
-            </div>
-          </Panel>
+            {sections.map((s) => (
+              <Panel key={s.title} title={s.title} extra={s.extra}>
+                {s.content}
+              </Panel>
+            ))}
+          </div>
+
+          <div className="sticky top-4 w-[420px] flex-none">
+            <Panel title={t('shell.willRun')}>
+              {/*
+                这里 whitespace-pre-wrap 而不是横向滚动：预览是「读」的，
+                命令太长时折行看得见全部内容比拖横条更有用；要复制的是任务目录里
+                那份真的 run.sh，不是这段预览。
+              */}
+              <div className="bg-muted text-foreground max-h-[420px] overflow-auto rounded-md p-3 font-mono text-xs leading-[19px] break-all whitespace-pre-wrap">
+                {preview}
+              </div>
+              {extraArgs !== undefined && onExtraArgsChange && (
+                <div className="mt-3 border-t pt-3">
+                  <div className="text-foreground mb-1.5 text-[13px] font-medium">{t('shell.extraArgs')}</div>
+                  {/*
+                    表单没暴露的 CLI 参数直接写在这里，提交时原样追加到命令行。
+                    用 textarea：参数值常带空格，一行放不下时折行可见。
+                  */}
+                  <textarea
+                    value={extraArgs}
+                    rows={2}
+                    placeholder={t('shell.extraArgsPlaceholder')}
+                    className="border-border bg-background text-foreground placeholder:text-muted-foreground w-full resize-y rounded-md border px-2.5 py-1.5 font-mono text-xs leading-5 outline-none focus-visible:border-ring/40"
+                    onChange={(e) => onExtraArgsChange(e.target.value)}
+                  />
+                  <div className="text-muted-foreground mt-1.5 text-[11px] leading-4">
+                    {t('shell.extraArgsFormat')}
+                  </div>
+                </div>
+              )}
+              <div className="text-muted-foreground mt-2.5 flex items-start gap-2 text-xs leading-[18px]">
+                <Info size={13} className="mt-0.5 flex-none" />
+                {t('shell.runScriptHint')}
+              </div>
+            </Panel>
+          </div>
         </div>
-      </div>
+      </Column>
 
       <PageAssistant
         open={assistantOpen}

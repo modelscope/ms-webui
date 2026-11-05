@@ -70,7 +70,8 @@ export function SearchSelect({
         onBlur={() => document.removeEventListener('mousedown', closeOnOutside)}
         onKeyDown={(e) => {
           if (e.key === 'Escape') setOpen(false);
-          if (e.key === 'Enter' && !allowCustom) {
+          /* 输入法组词中的 Enter 是选字，不当选中（与同文件自定义分支同一判据） */
+          if (e.key === 'Enter' && !allowCustom && !e.nativeEvent.isComposing) {
             e.preventDefault();
             const hit = filtered[0];
             if (hit) onChange(hit.value);

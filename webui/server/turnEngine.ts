@@ -20,7 +20,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentTool } from '../src/agent/tools';
+import type { AgentTool, ToolContext } from '../src/agent/tools';
 import type { ChatMessage, ToolCall } from '../src/api/models';
 import { runAgentLoop } from '../src/agent/runAgentLoop';
 import { compressHistory, estimateTokens, setSummaryStorage, type SummaryStorage } from '../src/agent/history';
@@ -30,11 +30,12 @@ import {
   listCatalogTool,
   readSkillDocTool,
   readSwiftSourceTool,
+  searchModelsTool,
   workspaceTools,
 } from '../src/agent/builtin';
 import { webSearchTool } from '../src/agent/builtin';
 import { AUTORESEARCH_GUIDE, researchTools } from '../src/agent/researchTools';
-import { HOME_SYSTEM, homeTools, moduleTaskTools } from '../src/agent/taskTools';
+import { HOME_SYSTEM, homeTools, moduleTaskTools, type CreatedLink } from '../src/agent/taskTools';
 import { listSkills, buildSkillsSystem } from '../src/api/skills';
 
 /** vite.config.ts 注入的执行面依赖（避免本模块反向 import 配置文件） */
@@ -67,6 +68,19 @@ export interface TurnEngineDeps {
   onSeveredTurn?(conv: string, model: string): void;
 }
 
+/** 页面提交的动态工具定义：schema 随回合携带（表单/画布等页面闭包工具，执行体在页面） */
+export interface PageToolSpec {
+  name: string;
+  description: string;
+  /** JSON Schema 形态的参数定义 */
+  parameters: Record<string, unknown>;
+  /*
+   * 重操作元数据（submit_form / flow_control）：引擎先挂起审批（approvals.json，
+   * 与任务工具同一张卡），批准才上抛页面段；拒绝直接回喂不进页面。
+   */
+  approval?: { title: string; reason: string };
+}
+
 /** 页面提交的回合材料：system 块与工具名清单由页面按胶囊状态组装 */
 export interface TurnSubmit {
   text: string;
@@ -76,6 +90,12 @@ export interface TurnSubmit {
   system: string[];
   /** 工具注册表键名清单（buildTools 支持的名字） */
   tools: string[];
+  /*
+   * 页面动态工具：引擎侧只挂 schema，执行体留在页面（引擎挂起上抛 →
+   * 页面执行 → resolvePageTool 回传续轮）。回传面按「列 × callId」索引，
+   * 多模型无法路由，仅单模型回合受理。
+   */
+  pageTools?: PageToolSpec[];
   /** 新会话建档标题（已有会话不传） */
   title?: string;
   sampling?: { temperature?: number; topP?: number; maxTokens?: number };
@@ -87,7 +107,7 @@ export interface TurnSubmit {
 
 /** SSE 推送的回合增量（页面订阅渲染的唯一事件面） */
 export interface TurnEvent {
-  type: 'turn-start' | 'user' | 'assistant-start' | 'delta' | 'assistant' | 'tool' | 'error' | 'turn-done';
+  type: 'turn-start' | 'user' | 'assistant-start' | 'delta' | 'assistant' | 'tool' | 'page-tool' | 'error' | 'turn-done';
   conv: string;
   model: string;
   /** delta：本次增量片段 */
@@ -96,6 +116,12 @@ export interface TurnEvent {
   toolCalls?: ToolCall[];
   /** assistant/tool/error：刚落盘的完整消息（页面直接替换尾部） */
   message?: ChatMessage;
+  /*
+   * page-tool：上抛给页面的挂起工具调用（执行体在页面；页面执行后经
+   * resolvePageTool 回传结果续轮，刷新后拉 listPendingPageTools 重放）。
+   * arguments 是调用参数的 JSON 串（create_link 例外，载荷是跳转意图对象）。
+   */
+  call?: { id: string; name: string; arguments: string };
   error?: string;
 }
 
@@ -133,6 +159,10 @@ export interface TurnEngineHandle {
    */
   retire(conv: string): void;
   listPendingApprovals(conv: string): TurnApproval[];
+  /** 页面回传挂起工具的执行结果（未知 callId 返回 false；结果即工具回喂文本） */
+  resolvePageTool(conv: string, model: string, callId: string, result: string): boolean;
+  /** 该列（不给 model 则该会话全部列）挂起中的页面工具调用（页面挂载/重连恢复重放用） */
+  listPendingPageTools(conv: string, model?: string): { id: string; name: string; arguments: string }[];
   /** 共用白名单（浏览器会话加载时灌进本地允许集，引擎与页面一致放行） */
   listAllowedCommands(): string[];
   /** 浏览器侧决定；approve 且勾了总是允许时把审批自带的命令收进白名单。未知 id 返回 false */
@@ -159,19 +189,28 @@ interface ApprovalsFile {
 
 /*
  * 工具注册表：页面按名字要工具（工具构建需要 conv/model 等执行面参数）。
- * 'task:<module>' 形态覆盖各业务页助手用的模块任务工具。
+ * 'task:<module>' 形态覆盖各业务页助手用的模块任务工具；'search_models' 与
+ * 'home' 的创建挂起通道由引擎传入（onPendingCreate 见 createTurnEngine 内
+ * hangPageTool）。
  */
-function buildTools(names: string[], conv: string, model: string, userRequest: string): AgentTool[] {
+function buildTools(
+  names: string[],
+  conv: string,
+  model: string,
+  userRequest: string,
+  onPendingCreate?: (link: CreatedLink) => Promise<string>,
+): AgentTool[] {
   const out: AgentTool[] = [];
   for (const name of names) {
     if (name === 'read_skill') out.push(readSkillDocTool());
     else if (name === 'list_catalog') out.push(listCatalogTool());
+    else if (name === 'search_models') out.push(searchModelsTool());
     else if (name === 'env_info') out.push(envInfoTool());
     else if (name === 'read_swift_source') out.push(readSwiftSourceTool());
     else if (name === 'workspace') out.push(...workspaceTools(conv, model));
     else if (name === 'research') out.push(...researchTools(conv, model));
     else if (name === 'web') out.push(webSearchTool());
-    else if (name === 'home') out.push(...homeTools({ userRequest, conv, model }));
+    else if (name === 'home') out.push(...homeTools({ userRequest, conv, model, ...(onPendingCreate ? { onPendingCreate } : {}) }));
     else if (name.startsWith('task:')) out.push(...moduleTaskTools(name.slice(5) as 'train' | 'eval' | 'export' | 'deploy' | 'script'));
   }
   return out;
@@ -270,6 +309,50 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       }
     }
   };
+
+  /*
+   * 页面工具挂起面（与审批挂起同构的第三类挂起）：动态工具的执行体在
+   * 页面（表单 setter、画布操作、跳转按钮），引擎把调用上抛（SSE page-tool
+   * 事件）后挂起回合，等页面执行完经 resolvePageTool 回传结果文本续轮。
+   * 无超时、无落盘：页面刷新不杀引擎（重连拉 listPendingPageTools 重放），
+   * 服务换代本就腰斩回合，落盘无意义。create_link 走同一通道：载荷是
+   * CreatedLink 跳转意图，页面渲染「前往查看」按钮，点击/稍后再说回传。
+   */
+  const pendingPageTools = new Map<string, { resolve: (result: string) => void; name: string; arguments: string }>();
+  const hangPageTool = (conv: string, model: string, name: string, payload: unknown): Promise<string> =>
+    new Promise((resolve) => {
+      const callId = randomUUID();
+      const key = `${conv}\u0000${model}\u0000${callId}`;
+      const argumentsText = JSON.stringify(payload ?? {});
+      pendingPageTools.set(key, { resolve, name, arguments: argumentsText });
+      broadcast({ type: 'page-tool', conv, model, call: { id: callId, name, arguments: argumentsText } });
+      /* 换代检测与审批同一形态：1s 一拍，旧实例的挂起等不到回传，按中断结算 */
+      const poll = setInterval(() => {
+        if (!isCurrent()) {
+          clearInterval(poll);
+          pendingPageTools.delete(key);
+          resolve(`页面工具 ${name} 因服务重启被中断，本次操作未完成。`);
+          return;
+        }
+        /* 已被 resolvePageTool/abort 消费：停採样 */
+        if (!pendingPageTools.has(key)) clearInterval(poll);
+      }, 1000);
+    });
+  /* 页面提交的工具定义 → 引擎侧 AgentTool：可选审批段在前（拒绝直接回喂），页面执行挂起段在后 */
+  const buildPageTools = (specs: PageToolSpec[], conv: string, model: string): AgentTool[] =>
+    specs.map((spec) => ({
+      schema: {
+        type: 'function' as const,
+        function: { name: spec.name, description: spec.description, parameters: spec.parameters },
+      },
+      execute: async (args: Record<string, unknown>, ctx: ToolContext) => {
+        if (spec.approval) {
+          const ok = await ctx.requestApproval(spec.approval.title, spec.approval.reason);
+          if (!ok) return '用户拒绝了本次操作。请继续调整或询问用户意图。';
+        }
+        return await hangPageTool(conv, model, spec.name, args);
+      },
+    }));
 
   /*
    * 引擎版 requestApproval：免审总闸或白名单命中放行；未命中挂起回合（落盘
@@ -474,6 +557,8 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       for (const m of req.models) {
         if (running.has(`${conv}\u0000${m}`)) return { error: 'turn in flight' };
       }
+      /* 页面工具回传面按「列 × callId」索引，多模型无法路由——单模型才受理 */
+      if (req.pageTools?.length && req.models.length !== 1) return { error: 'page tools require a single model' };
       const turnId = randomUUID();
       if (req.title) deps.upsertChat(conv, req.title);
       /* 会话级免审随回合同步并持久化：开着=本会话一切回合（含后台唤醒）免审 */
@@ -490,7 +575,10 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
         void runTurnCore(conv, m, {
           userMsg: { role: 'user', content: req.text, ...(req.images?.length ? { images: req.images } : {}) },
           system: req.system.map((content) => ({ role: 'system' as const, content })),
-          tools: buildTools(req.tools, conv, m, req.text),
+          tools: [
+            ...buildTools(req.tools, conv, m, req.text, (link) => hangPageTool(conv, m, 'create_link', link)),
+            ...(req.pageTools?.length ? buildPageTools(req.pageTools, conv, m) : []),
+          ],
           label: 'page',
           sampling: req.sampling,
           abortable,
@@ -549,7 +637,14 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
             { role: 'system', content: WORKBENCH_GUIDE },
             ...(skillsSystem ? [{ role: 'system' as const, content: skillsSystem }] : []),
           ],
-          tools: buildTools(['read_skill', 'list_catalog', 'env_info', 'read_swift_source', 'workspace', 'research', 'home'], conv, model, text),
+          tools: buildTools(
+            ['read_skill', 'list_catalog', 'env_info', 'read_swift_source', 'workspace', 'research', 'home'],
+            conv,
+            model,
+            text,
+            /* 唤醒回合的 create_* 同样走挂起：页面回来后重放按钮，模型能等到用户决定 */
+            (link) => hangPageTool(conv, model, 'create_link', link),
+          ),
           label: 'wakeup',
           ownedTurnId: turnId,
         });
@@ -585,13 +680,44 @@ export function createTurnEngine(deps: TurnEngineDeps): TurnEngineHandle {
       const before = approvals.pending.length;
       approvals.pending = approvals.pending.filter((p) => !(p.conv === conv && p.model === model));
       if (approvals.pending.length !== before) saveApprovals();
+      /* 页面工具挂起同样结算：不结算则回合永远挂在 await 上，按钮/卡片永不消失 */
+      const prefix = `${conv}\u0000${model}\u0000`;
+      for (const [key, entry] of [...pendingPageTools]) {
+        if (key.startsWith(prefix)) {
+          pendingPageTools.delete(key);
+          entry.resolve(`用户停止了回合，页面工具 ${entry.name} 未执行。`);
+        }
+      }
     },
     retire(conv) {
       retired.add(conv);
       for (const model of this.busyModels(conv)) this.abortTurn(conv, model);
     },
-    listPendingApprovals(conv) {
+    listPendingApprovals(conv: string) {
       return approvals.pending.filter((p) => p.conv === conv);
+    },
+    resolvePageTool(conv, model, callId, result) {
+      const entry = pendingPageTools.get(`${conv}\u0000${model}\u0000${callId}`);
+      if (!entry) return false;
+      pendingPageTools.delete(`${conv}\u0000${model}\u0000${callId}`);
+      entry.resolve(result);
+      return true;
+    },
+    listPendingPageTools(conv, model) {
+      const prefix = model ? `${conv}\u0000${model}\u0000` : `${conv}\u0000`;
+      const out: { id: string; name: string; arguments: string; model?: string }[] = [];
+      for (const [key, entry] of pendingPageTools) {
+        if (key.startsWith(prefix)) {
+          /* 不给 model 时连带列名（页面重连后列名未知，需自己分桶） */
+          const rest = key.slice(prefix.length);
+          out.push(
+            model
+              ? { id: rest, name: entry.name, arguments: entry.arguments }
+              : { id: rest.split('\u0000')[1], name: entry.name, arguments: entry.arguments, model: rest.split('\u0000')[0] },
+          );
+        }
+      }
+      return out;
     },
     listAllowedCommands() {
       return [...approvals.allowed];

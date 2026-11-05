@@ -1,7 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { ArrowUp, Bot, Check, Loader2, Square, User, X, Zap } from 'lucide-react';
 import { cn } from 'cn';
 import { Hint } from '@/components/Hint';
+import { ThinkingBlock, ToolFold, fmtCallArgs } from '@/components/ChatBlocks';
+import type { ToolCall } from '@/api/models';
 import { useT } from '@/i18n';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -39,6 +41,19 @@ export interface AiMessage<A> {
    * 每条消息各自标各自的事实。
    */
   offline?: boolean;
+  /** 用户消息附带的图片（data URL，多模态输入随回合提交） */
+  images?: string[];
+  /*
+   * 下面三个结构化字段与对话页 ChatPage 的消息形态对齐：思维链/工具调用
+   * 折叠成卡（ChatBlocks），不再由调用方拼成一行文本。使用方可以不给——
+   * 纯文本消息照旧只走 text。
+   */
+  /** 思维链（推理模型流式产出）。pending 且正文未出时折叠卡显示「思考中…」 */
+  reasoning?: string;
+  /** 本条 assistant 消息发起的工具调用（含页面工具之外的注册表工具） */
+  toolCalls?: ToolCall[];
+  /** 引擎落盘的工具结果全文（不截断，折叠卡里滚动看） */
+  toolResult?: string;
 }
 
 /** 一条提议在卡片上长什么样。翻译权在提议方，面板不认识动作的内部结构 */
@@ -78,6 +93,7 @@ export function AiChatPanel<A>({
   accent = 'var(--primary)',
   placeholder,
   footerNote,
+  trailing,
 }: {
   messages: AiMessage<A>[];
   describe: (a: A) => ProposalView;
@@ -101,15 +117,23 @@ export function AiChatPanel<A>({
    * offline 标记，footer 不再承担「这套回答是不是本地示意」的判断。
    */
   footerNote?: string;
+  /*
+   * 消息流末尾的固定插槽（输入框上方、随对话一起滚动）：审批卡这类
+   * 「要用户决定」的面挂在这里——盖在消息区上方会遮挡对话，藏在底部
+   * 又看不见，跟在最新消息后面才是它的自然位置。
+   */
+  trailing?: ReactNode;
 }) {
   const tail = useRef<HTMLDivElement>(null);
   const { t } = useT();
 
-  // 新消息进来滚到底。依赖里带上最后一条的 id，避免只改 states 时也滚
+  // 新消息进来滚到底。依赖里带上最后一条的 id，避免只改 states 时也滚；
+  // 尾部插槽出现（如审批卡）同样要滚到底，否则要手翻才能看见
   const lastId = messages[messages.length - 1]?.id;
+  const hasTrailing = trailing != null;
   useEffect(() => {
     tail.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [lastId, messages.length]);
+  }, [lastId, messages.length, hasTrailing]);
 
   const send = () => {
     if (draft.trim()) onSend();
@@ -128,18 +152,46 @@ export function AiChatPanel<A>({
                 {m.role === 'user' ? <User className="text-neutral-500" /> : <Bot />}
               </span>
               {/* pre-wrap：剧本里是带换行的多行文本，得让它保留 */}
-              <div
-                className={cn(
-                  'text-foreground max-w-[86%] rounded-xl px-3 py-2 text-[13px] leading-[21px] whitespace-pre-wrap',
-                  m.role === 'user' ? 'bg-secondary' : 'bg-muted',
-                )}
-              >
-                {m.pending ? <span className="text-muted-foreground">{t('chatPanel.thinking')}</span> : m.text}
-                {m.offline && (
-                  <span className="text-muted-foreground mt-1.5 block border-t border-dashed pt-1 text-[11px]">
-                    {t('chatPanel.demoHint')}
-                  </span>
-                )}
+              <div className="flex min-w-0 max-w-[86%] flex-col">
+                {/* 附属块（思维链/工具调用）与正文气泡是兄弟节点，层级与对话页一致 */}
+                {m.role === 'assistant' && m.reasoning ? (
+                  <ThinkingBlock text={m.reasoning} active={Boolean(m.pending) && !m.text} />
+                ) : null}
+                {m.role === 'assistant' &&
+                  m.toolCalls?.map((c) => (
+                    <ToolFold key={c.id} label={t('chat.toolCall', { name: c.name })} text={fmtCallArgs(c)} />
+                  ))}
+                {/* 工具结果全文折叠卡：没有正文时不画空气泡，卡片独立成行 */}
+                {m.role === 'assistant' && m.toolResult ? (
+                  <ToolFold label={t('chat.toolResult')} text={m.toolResult} />
+                ) : null}
+                {m.role === 'user' || m.text || !!m.images?.length || (m.pending && !m.reasoning) ? (
+                  <div
+                    className={cn(
+                      'text-foreground max-w-full rounded-xl px-3 py-2 text-[13px] leading-[21px] whitespace-pre-wrap',
+                      m.role === 'user' ? 'bg-secondary' : 'bg-muted',
+                    )}
+                  >
+                    {m.role === 'user' && !!m.images?.length && (
+                      <div className="mb-1 flex flex-wrap justify-end gap-1.5">
+                        {m.images.map((src, j) => (
+                          <img key={j} src={src} alt="" className="border-border max-h-32 rounded-lg border object-contain" />
+                        ))}
+                      </div>
+                    )}
+                    {m.text}
+                    {/* 流式光标：与对话页同款，pending 且已有正文时跟在末尾 */}
+                    {m.role === 'assistant' && m.pending && m.text ? <span className="animate-pulse">▍</span> : null}
+                    {m.pending && !m.text ? (
+                      <span className="text-muted-foreground">{t('chatPanel.thinking')}</span>
+                    ) : null}
+                    {m.offline && (
+                      <span className="text-muted-foreground mt-1.5 block border-t border-dashed pt-1 text-[11px]">
+                        {t('chatPanel.demoHint')}
+                      </span>
+                    )}
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -159,6 +211,8 @@ export function AiChatPanel<A>({
             )}
           </div>
         ))}
+        {/* 尾部插槽（审批卡等）：跟在最新消息后面，输入框上方 */}
+        {trailing}
         <div ref={tail} />
       </div>
 
@@ -189,7 +243,8 @@ export function AiChatPanel<A>({
             value={draft}
             onChange={(e) => onDraftChange(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+              /* Enter 发送、Shift+Enter 换行；输入法组词中的 Enter 是选字，不当发送（与首页同判据） */
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 send();
               }

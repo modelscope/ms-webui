@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
-import { ArrowUp, Bot, ChevronRight, Columns2, FlaskConical, Globe, History, Loader2, Paperclip, Plus, ShieldAlert, SlidersHorizontal, Square, Terminal, Trash2, User, Wrench, X } from 'lucide-react';
+import { ArrowUp, Bot, ChevronRight, Columns2, FlaskConical, Globe, History, Loader2, Paperclip, Plus, ShieldAlert, SlidersHorizontal, Square, Terminal, Trash2, User, X } from 'lucide-react';
 import { cn } from 'cn';
 import { toast } from 'sonner';
 import { PageHeader } from '@/components/PageHeader';
+import { normalizeImage } from '@/components/attachments';
+/* 思维链/工具折叠卡与参数格式化：与各助手面板共用同一套（原本地实现迁出） */
+import { ThinkingBlock, ToolFold, fmtCallArgs } from '@/components/ChatBlocks';
 import { CheckboxGroup, NumberInput, SegmentedControl, SelectInput } from '@/components/FormField';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -50,7 +53,16 @@ import { useApproval } from '@/agent/useApproval';
 import { buildSkillsSystem, listSkills } from '@/api/skills';
 import { fsTool } from '@/api/tools';
 import { resolvePersona } from '@/store/systemPrompts';
-import { submitTurn, openTurnLive, abortTurn, fetchConvBuckets, deleteConv, moveConvBuckets } from '@/api/turns';
+import {
+  submitTurn,
+  openTurnLive,
+  abortTurn,
+  fetchConvBuckets,
+  fetchPendingPageTools,
+  resolvePageTool,
+  deleteConv,
+  moveConvBuckets,
+} from '@/api/turns';
 import { useSettings } from '@/settings/SettingsContext';
 
 /**
@@ -374,6 +386,17 @@ function Composer({ big, placeholder, state }: { big?: boolean; placeholder?: st
 }
 
 /**
+ * create_* 工具上抛的挂起跳转意图：link 本体 + 引擎挂起关联（callId）。
+ * 用户点「前往查看」或「稍后再说」后经 resolvePageTool 回传，引擎续轮——
+ * 模型知道用户跳没跳；后台唤醒回合页面不在时挂起等浏览器回来。
+ */
+interface PendingLink {
+  link: CreatedLink;
+  /** 引擎挂起的调用 id：回传续轮用（回合已结束则回传静默失败，跳转仍有效） */
+  callId: string;
+}
+
+/**
  * 单个对话列，多模型对比时并排放多列。tone 是一个背景色 class，见 COLUMN_TONES。
  * messages 是这一列（一个模型）与用户的完整对话；streaming 时末尾画一个光标。
  */
@@ -384,14 +407,17 @@ function ChatColumn({
   streaming,
   links,
   onGo,
+  onLater,
 }: {
   model: string;
   tone: string;
   messages: ChatMessage[];
   /* create_* 工具备好的跳转意图：渲染在消息流末尾，点击才落预填并跳转 */
-  links?: CreatedLink[];
-  /* 按钮点击回调（落预填 + 跳转 + 消费掉该意图）；无意图时不传 */
-  onGo?: (link: CreatedLink) => void;
+  links?: PendingLink[];
+  /* 按钮点击回调（落预填 + 跳转 + 回传引擎 + 消费掉该意图）；无意图时不传 */
+  onGo?: (item: PendingLink) => void;
+  /* 「稍后再说」回调（不跳转、按钮保留、回传引擎让回合收尾）；无意图时不传 */
+  onLater?: (item: PendingLink) => void;
   streaming?: boolean;
 }) {
   const { t } = useT();
@@ -503,17 +529,29 @@ function ChatColumn({
         {/* create_* 工具的跳转意图：不在流式期抢路由，等模型说完话用户自己决定 */}
         {!!links?.length && onGo && (
           <div className="flex flex-wrap gap-2 pl-9.5">
-            {links.map((link, i) => (
-              <Button
-                key={`${link.to}-${i}`}
-                size="sm"
-                variant="outline"
-                className="h-7 gap-1.5 px-3 text-xs"
-                onClick={() => onGo(link)}
-              >
-                {t('chat.goLink', { label: link.label })}
-                <ChevronRight size={12} />
-              </Button>
+            {links.map((item, i) => (
+              <span key={`${item.link.to}-${i}`} className="flex items-center gap-1.5">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 gap-1.5 px-3 text-xs"
+                  onClick={() => onGo(item)}
+                >
+                  {t('chat.goLink', { label: item.link.label })}
+                  <ChevronRight size={12} />
+                </Button>
+                {/* 稍后再说：不跳转但让挂起回合收尾，模型可继续帮用户调参；按钮保留可再点 */}
+                {onLater && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-muted-foreground h-7 px-2 text-xs"
+                    onClick={() => onLater(item)}
+                  >
+                    {t('chat.laterLink')}
+                  </Button>
+                )}
+              </span>
             ))}
           </div>
         )}
@@ -552,75 +590,6 @@ function WakeEventCard({ text }: { text: string }) {
       </div>
     </div>
   );
-}
-
-/**
- * 思维链折叠块：默认收起，点标题行展开/收起。流式进行中（正文还没开始出）
- * 标题显示「思考中…」，此时也能点开看进度；字数提示让人不点开也能掂量长短。
- */
-function ThinkingBlock({ text, active }: { text: string; active?: boolean }) {
-  const { t } = useT();
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="border-border/60 bg-muted/40 mb-1.5 overflow-hidden rounded-lg border">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="text-muted-foreground hover:text-foreground flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs transition-colors"
-      >
-        <ChevronRight size={12} className={cn('flex-none transition-transform', open && 'rotate-90')} />
-        <span className="flex-none">{active ? t('chat.thinkingActive') : t('chat.thinkingDone')}</span>
-        {!active && (
-          <span className="text-muted-foreground/60 truncate text-[11px]">{t('chat.chars', { n: text.length })}</span>
-        )}
-      </button>
-      {open && (
-        <div className="text-muted-foreground border-border/60 max-h-64 overflow-auto border-t px-3 py-2 text-[13px] leading-5 whitespace-pre-wrap">
-          {text}
-          {active && <span className="animate-pulse">▍</span>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * 工具调用 / 工具结果的折叠块：与 ThinkingBlock 同款交互（默认收起、点标题
- * 展开），收起时标题行给字数让人掂量要不要点开。mono 字体——内容要么是
- * 参数 JSON 要么是命令输出，不是自然语言。
- */
-function ToolFold({ label, text }: { label: string; text: string }) {
-  const { t } = useT();
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="border-border/60 bg-muted/40 mb-1.5 overflow-hidden rounded-lg border">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="text-muted-foreground hover:text-foreground flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs transition-colors"
-      >
-        <Wrench size={12} className="flex-none" />
-        <span className="flex-none">{label}</span>
-        {!open && (
-          <span className="text-muted-foreground/60 truncate text-[11px]">{t('chat.chars', { n: text.length })}</span>
-        )}
-      </button>
-      {open && (
-        <div className="text-muted-foreground border-border/60 max-h-64 overflow-auto border-t px-3 py-2 font-mono text-[12px] leading-5 whitespace-pre-wrap break-all">
-          {text}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** 工具调用的参数转成可读的多行 JSON（坏 JSON 原样展示） */
-function fmtCallArgs(c: ToolCall): string {
-  try {
-    return JSON.stringify(JSON.parse(c.arguments), null, 2);
-  } catch {
-    return c.arguments;
-  }
 }
 
 /**
@@ -686,29 +655,7 @@ function fmtAgo(at: number, t: (key: MessageKey, vars?: Record<string, string | 
   return t('chat.daysAgo', { n: Math.floor(s / 86400) });
 }
 
-/**
- * 选中的图片统一过一遍 canvas：长边压到 1120、转 JPEG（透明区域垫白底）。
- * 两个动机——多模态模型的有效分辨率就在这一档，更大的图只是浪费 token；
- * data URL 还要随消息进 localStorage 持久化，原图动辄几 MB 会撞配额。
- */
-async function normalizeImage(file: File, t: (key: MessageKey) => string): Promise<string> {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, 1120 / Math.max(bitmap.width, bitmap.height));
-  const w = Math.max(1, Math.round(bitmap.width * scale));
-  const h = Math.max(1, Math.round(bitmap.height * scale));
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error(t('chat.canvasFail'));
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(0, 0, w, h);
-  ctx.drawImage(bitmap, 0, 0, w, h);
-  bitmap.close();
-  return canvas.toDataURL('image/jpeg', 0.85);
-}
-
-/**
+/*
  * web_search 的工具结果：带编号的标题/链接/摘要块。引用处注明「来源 [n]」
  * 的引导写在工具 description 与 WEB_SEARCH_SYSTEM 里，这里只给数据本身。
  */
@@ -883,12 +830,13 @@ export function ChatPage() {
   const [busyList, setBusyList] = useState<string[]>([]);
   const streaming = busyList.length > 0;
   /*
-   * create_* 工具上抛的跳转意图，按「会话 :: 模型列」分桶存。点击按钮时才
-   * 落预填并跳转（工具本身不再抢路由——消融场景下用户可能想先继续对话，
-   * 自动跳转会打断）。点掉的按钮即消费，不点就一直在那，刷新后不复活
-   * （组件态；跳转与否本来就是即时决策，不进 turns 持久化）。
+   * create_* 工具上抛的跳转意图，按「会话 :: 模型列」分桶存（含引擎挂起
+   * callId：点击「前往查看」/「稍后再说」后回传续轮）。点击按钮时才落预填
+   * 并跳转（消融场景下用户可能想先继续对话，自动跳转会打断）。点掉的按钮
+   * 即消费，不点就一直在那，刷新后经 SSE 重连的挂起重放回来（组件态；
+   * 跳转与否本来就是即时决策，不进 turns 持久化）。
    */
-  const [pendingLinks, setPendingLinks] = useState<Record<string, CreatedLink[]>>({});
+  const [pendingLinks, setPendingLinks] = useState<Record<string, PendingLink[]>>({});
   /** 技能注入段：mount 时拉一次清单拼好，send() 直接消费（空串 = 无技能不注入） */
   const [skillsSystem, setSkillsSystem] = useState('');
 
@@ -1032,17 +980,32 @@ export function ChatPage() {
     return Math.max(Math.ceil((next - Date.now()) / 60_000), 1);
   })();
 
-  /* 按钮点击：落预填（含会话续聊上下文）→ 跳转 → 消费掉这个意图 */
-  const goCreatedLink = (conv: string, modelId: string, link: CreatedLink) => {
-    writePrefill(link.module, link.payload);
-    navigate(link.to);
+  /* 按钮点击：落预填（含会话续聊上下文）→ 跳转 → 回传引擎续轮（模型知道用户已跳）→ 消费掉这个意图 */
+  const goCreatedLink = (modelId: string, item: PendingLink) => {
+    writePrefill(item.link.module, item.link.payload);
+    navigate(item.link.to);
     setPendingLinks((prev) => {
-      const rest = (prev[`${conv}::${modelId}`] ?? []).filter((l) => l !== link);
+      const rest = (prev[`${activeConv}::${modelId}`] ?? []).filter((x) => x !== item);
       const next = { ...prev };
-      if (rest.length) next[`${conv}::${modelId}`] = rest;
-      else delete next[`${conv}::${modelId}`];
+      if (rest.length) next[`${activeConv}::${modelId}`] = rest;
+      else delete next[`${activeConv}::${modelId}`];
       return next;
     });
+    void resolvePageTool(
+      activeConv,
+      modelId,
+      item.callId,
+      `用户已点击跳转到 ${item.link.to}，表单已按上述参数预填；目标页的 AI 助手会带着这段对话续聊，后续引导交给它。`,
+    );
+  };
+  /* 稍后再说：不跳转、按钮保留（用户之后仍可点），回传后挂起回合收尾，模型可继续调参 */
+  const laterCreatedLink = (modelId: string, item: PendingLink) => {
+    void resolvePageTool(
+      activeConv,
+      modelId,
+      item.callId,
+      '用户暂未跳转（「前往查看」按钮保留在对话里）；可继续在本对话里调整参数，用户也可能稍后自行前往页面创建。',
+    );
   };
 
   /*
@@ -1396,6 +1359,27 @@ export function ChatPage() {
       return;
     }
     const conv = convParam;
+    /*
+     * 挂起恢复：重连（刷新/切回会话）时重放挂起中的 create_link 跳转意图
+     * （按钮回来，用户仍可点；按 callId 去重保证幂等）。
+     */
+    void fetchPendingPageTools(conv).then((calls) => {
+      for (const c of calls) {
+        if (c.name !== 'create_link') continue;
+        const m = c.model;
+        if (!m) continue;
+        try {
+          const link = JSON.parse(c.arguments) as CreatedLink;
+          if (!link || typeof link !== 'object' || !link.to || !link.module) continue;
+          setPendingLinks((prev) => {
+            const bucket = (prev[`${conv}::${m}`] ?? []).filter((x) => x.callId !== c.id);
+            return { ...prev, [`${conv}::${m}`]: [...bucket, { link, callId: c.id }] };
+          });
+        } catch {
+          /* 坏载荷跳过：按钮不重放，挂起靠停止/换代结算 */
+        }
+      }
+    });
     const patchColumn = (model: string, fn: (msgs: ChatMessage[]) => ChatMessage[]): void => {
       setTurns((prev) => {
         const bucket = prev[conv]?.[model] ?? [];
@@ -1421,6 +1405,26 @@ export function ChatPage() {
             if (last?.role === 'user' && last.content === incoming.content) return prev;
             return { ...prev, [conv]: { ...(prev[conv] ?? {}), [ev.model]: [...bucket, incoming] } };
           });
+          return;
+        }
+        case 'page-tool': {
+          /*
+           * create_* 的挂起上抛（引擎在等用户决定）：渲染「前往查看」按钮 +
+           * 「稍后再说」。其余页面工具（set_form_fields 等）属于各页 AI 面板
+           * 的执行面，首页不消费。
+           */
+          const call = ev.call;
+          if (!call || call.name !== 'create_link') return;
+          try {
+            const link = JSON.parse(call.arguments) as CreatedLink;
+            if (!link || typeof link !== 'object' || !link.to || !link.module) return;
+            setPendingLinks((prev) => ({
+              ...prev,
+              [`${conv}::${ev.model}`]: [...(prev[`${conv}::${ev.model}`] ?? []), { link, callId: call.id }],
+            }));
+          } catch {
+            /* 坏载荷丢弃：回合按挂起等待或停止结算 */
+          }
           return;
         }
         case 'assistant-start':
@@ -1856,7 +1860,8 @@ export function ChatPage() {
                     tone={COLUMN_TONES[i % COLUMN_TONES.length]}
                     messages={columnTurns(m)}
                     links={pendingLinks[`${activeConv}::${m}`]}
-                    onGo={(link) => goCreatedLink(activeConv, m, link)}
+                    onGo={(item) => goCreatedLink(m, item)}
+                    onLater={(item) => laterCreatedLink(m, item)}
                     streaming={streaming}
                   />
                 ))
@@ -1869,7 +1874,8 @@ export function ChatPage() {
                 tone="bg-primary"
                 messages={columnTurns(single)}
                 links={pendingLinks[`${activeConv}::${single}`]}
-                onGo={(link) => goCreatedLink(activeConv, single, link)}
+                onGo={(item) => goCreatedLink(single, item)}
+                onLater={(item) => laterCreatedLink(single, item)}
                 streaming={streaming}
               />
             )}
