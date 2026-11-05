@@ -3,13 +3,15 @@
  * parse_spec）、按算法/表单字段推导组清单（对齐各 recipe 的 group_requests）、
  * 计划态 → CLI flag 的转换，以及教科书口径的理论效率粗估。
  *
- * 职责边界：表单的「每组卡数」定组边界（每组多少张卡），本层定组内切分
- * （spec 各维）。占独立 rank 维的只有 dp/fsdp/tp/pp/cp（world = 五维乘积，
+ * 职责边界：本层定组内切分（spec 各维）；组卡数不再单独输入——它是派生值，
+ * 每组卡数 = 该组 spec 的 rank 维乘积（采样组 = vllm 引擎 world），分段串由
+ * deriveSegments 从计划态生成。占独立 rank 维的只有 dp/fsdp/tp/pp/cp（world = 五维乘积，
  * 须恰好等于组卡数——对齐 from_spec(spec, world_size=nproc) 的 reshape 校验）；
  * ep/etp/vpp/ul/sp 是 mesh 对象属性维不占 rank。后端词表：transformers 消费
- * dp/fsdp/ep/ul，tp/pp/cp/etp/vpp/sp 为 megatron 专用。
+ * dp/fsdp/ep/ul，tp/pp/cp/etp/vpp/sp 为 megatron 专用；ul（ulysses）为
+ * transformers 专有（device_mesh 标注 transformers only），megatron 后端下隐藏。
  */
-import type { RlPlacementInfo } from './RlGpuPlanner';
+import type { RlPlacement, RlPlacementInfo } from './RlGpuPlanner';
 import type { MessageKey } from '@/i18n';
 
 export type Backend = 'transformers' | 'megatron';
@@ -143,12 +145,19 @@ export function deriveGroups(input: DeriveGroupsInput): PlannerGroup[] {
   }
   const rl = input.rlInfo;
   const online = input.rlType !== undefined;
+  const rlType = input.rlType!;
   if (!online || !rl) {
     /* 非在线 RL（sft/pt/离线偏好优化）：单训练组，卡池全部归它 */
     return [{ key: 'model', label: 'planner.groupModel', count: 1, cards: Math.max(1, input.nproc), kind: 'mesh', flag: 'parallel_spec', color: GROUP_COLORS.model }];
   }
   const groups: PlannerGroup[] = [
-    { key: 'model', label: 'planner.groupModel', count: 1, cards: rl.actorCards, kind: 'mesh', flag: 'parallel_spec', color: GROUP_COLORS.model },
+    {
+      key: 'model', label: 'planner.groupModel', count: 1, cards: rl.actorCards, kind: 'mesh',
+      flag: 'parallel_spec', color: GROUP_COLORS.model,
+      /* PPO 的 value critic 与策略同组同卡训练（initialize_ppo_cluster：共用 'model' 组、
+       * 同 slice_dp，不单列组不占新卡）——仅作展示标注，无独立 spec */
+      detail: rlType === 'ppo' ? { key: 'planner.groupCritic' } : undefined,
+    },
   ];
   /* 采样组恒在（colocate 时 cards=0：覆盖在训练卡上，引擎形状仍可调） */
   groups.push({
@@ -162,14 +171,17 @@ export function deriveGroups(input: DeriveGroupsInput): PlannerGroup[] {
     seg += 1;
     return Math.max(1, c);
   };
-  const rlType = input.rlType!;
   const ormRules = input.ormRules ?? [];
   const prmRules = input.prmRules ?? [];
-  /* grpo/ppo：ref 组在前（对齐 grpo_group_requests/ppo_group_requests 的顺序） */
+  /* grpo/ppo：ref 组在前（对齐 grpo_group_requests/ppo_group_requests 的顺序）。
+   * 判据与 recipe 的 disable 分支对齐：tuner_config 存在（lora/trainable_tokens）且
+   * 未配 ref_adapters/sync_ref_model 时复用策略 actor 不建组（表单无这两个字段，
+   * 故 tuner==trainable_tokens 同样不建）；PPO 恒锚 KL，全参必建、无需 beta/ref_model */
   if (rlType === 'grpo' || rlType === 'ppo') {
+    const fullParam = tuner === 'full';
     const hasRef = rlType === 'ppo'
-      ? tuner !== 'lora' /* PPO 恒锚 KL：全参留 frozen 副本，LoRA 复用策略不建组 */
-      : tuner !== 'lora' && Boolean(params.ref_model) && Number(params.beta ?? 0) > 0;
+      ? fullParam
+      : fullParam && Boolean(params.ref_model) && Number(params.beta ?? 0) > 0;
     if (hasRef) {
       groups.push({ key: 'ref', label: 'planner.groupRef', detail: { key: 'planner.groupRefDetail' }, count: 1, cards: takeCards(), kind: 'mesh', flag: 'ref_parallel_spec', color: GROUP_COLORS.ref });
     }
@@ -243,10 +255,47 @@ export function planFlags(plan: ParallelPlan, groups: PlannerGroup[]): Record<st
   return flags;
 }
 
-/** spec 组的填满校验：world 须恰好等于组卡数（对齐 from_spec 的 reshape 校验） */
-export function specFits(s: SpecDims | undefined, cards: number): boolean {
-  if (!s) return true; /* 未配置 = 纯 DP 缺省（dp=cards 自然填满） */
-  return specWorld(s) === cards;
+/* ---------- 组卡数派生（自动 worldsize：卡数 = spec 的 rank 维乘积） ---------- */
+
+/** 组键 → 分段串段序：model 段 0；sampler 仅 disaggregated 占段（colocate 覆盖训练
+ * 卡不占段）；辅助组按 count 逐段展开（spread 教师 / 多 orm 各一段） */
+export function groupSegments(groups: PlannerGroup[], placement: RlPlacement['placement']): Record<string, number[]> {
+  const map: Record<string, number[]> = {};
+  let seg = 0;
+  for (const g of groups) {
+    if (g.key === 'model') {
+      map.model = [seg++];
+    } else if (g.key === 'sampler') {
+      map.sampler = placement === 'disaggregated' ? [seg++] : [];
+    } else {
+      map[g.key] = Array.from({ length: Math.max(1, g.count) }, () => seg++);
+    }
+  }
+  return map;
+}
+
+/**
+ * plan + 组清单 → 分段串：组卡数的唯一派生源（弹窗确认时写回 RlGpuPlanner）。
+ * 每段 = 该组 spec 的 rank 维乘积；specs 缺省 = 纯 DP，卡数沿用组清单带来的分配；
+ * 采样组 = vllm 引擎 world；count>1 的组（spread 教师 / 多 orm）各段等宽（共用单值 spec）。
+ */
+export function deriveSegments(
+  plan: ParallelPlan,
+  groups: PlannerGroup[],
+  placement: RlPlacement['placement'],
+): string {
+  const segMap = groupSegments(groups, placement);
+  const out: number[] = [];
+  for (const g of groups) {
+    const segs = segMap[g.key] ?? [];
+    if (g.key === 'sampler') {
+      if (segs.length > 0) out.push(plan.vllmDims.dp * plan.vllmDims.tp * plan.vllmDims.pp);
+      continue;
+    }
+    const spec = plan.specs[g.key] ?? defaultSpecFor(g.cards);
+    for (let i = 0; i < segs.length; i++) out.push(specWorld(spec));
+  }
+  return out.join(',');
 }
 
 /* ---------- 理论效率粗估（教科书口径，非实测） ---------- */

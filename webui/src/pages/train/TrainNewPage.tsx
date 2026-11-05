@@ -16,7 +16,7 @@ import { listPlugins } from '@/api/plugins';
 import { listTrains, startCodeTrain, startTrain, type TrainTaskInfo, fetchDatasetPreview, fetchModelStructure, listOrmRules, type DatasetPreviewRow, type ModelStructure } from '@/api/train';
 import { listGpus, type GpuInfo } from '@/api/deploy';
 import { DatasetPreviewDialog, StructureDialog } from './TrainPreflight';
-import { parseRlPlacement, RlGpuPlanner, type RlPlacement, type RlTeacherOpts } from './RlGpuPlanner';
+import { parseRlPlacement, RlGpuPlanner, type RlPlacement, type RlPlacementInfo, type RlTeacherOpts } from './RlGpuPlanner';
 import { ParallelPlanner } from './ParallelPlanner';
 import { defaultPlan, deriveGroups, planFlags, type ParallelPlan } from './parallelSpec';
 import { estimateMemorySharded } from './memoryEstimate';
@@ -395,15 +395,25 @@ export function TrainNewPage() {
     : 0;
   const teacherOpts: RlTeacherOpts = distillRl ? { teacherCount, teacherRequired: true } : {};
   const rlInfo = parseRlPlacement(rlPlacement, totalGpus, teacherOpts, t);
+  /* 分段串失配/为空时的兜底形态（训练组吃余量、其余每段 1 卡）：组清单恒取完整结构，
+   * 否则弹窗与段数校验会随降级清单漂移；失配由下方重置效应修复 */
+  const fallbackInfo: RlPlacementInfo = {
+    valid: false,
+    actorCards: Math.max(1, totalGpus - (rlPlacement.placement === 'disaggregated' ? 1 : 0)),
+    samplerCards: rlPlacement.placement === 'disaggregated' ? 1 : 0,
+    auxSegments: [],
+    auxCards: 0,
+    totalCards: totalGpus,
+  };
   /* 组清单（算法/字段推导，对齐各 recipe 的 group_requests）与并行计划 → CLI flag：
-   * 「显卡与分片分组」弹窗、命令预览、提交三处同源；非在线 RL 退化为单训练组 */
+   * 「显卡与分片分组」弹窗（确认后落盘）、命令预览、提交三处同源；非在线 RL 退化为单训练组 */
   const groups = deriveGroups({
     taskType,
     rlType: isOnlineRl ? rlType : undefined,
     tuner,
     params,
     nproc: totalGpus,
-    rlInfo: isOnlineRl && rlInfo.valid ? rlInfo : undefined,
+    rlInfo: isOnlineRl ? (rlInfo.valid ? rlInfo : fallbackInfo) : undefined,
     ormRules: ormRules.orm,
     prmRules: ormRules.prm,
   });
@@ -412,12 +422,16 @@ export function TrainNewPage() {
    * 辅助组按 count 展开（spread K 教师 / N orm 模型各占一段） */
   const expectedSegments = (rlPlacement.placement === 'colocate' ? 1 : 2)
     + groups.filter((g) => g.key !== 'model' && g.key !== 'sampler').reduce((a, g) => a + g.count, 0);
-  /* 初次进入在线算法且未填过分组时给默认切分：训练组拿走其余、采样组 1 张 */
+  /* 初次进入/算法或放置切换后段数与组结构失配时，回填默认分配：训练组拿余量、
+   * 其余每段 1 卡（组卡数的常规来源是弹窗确认时由 spec 派生的分段串） */
   useEffect(() => {
-    if (isOnlineRl && rlPlacement.groups === '' && totalGpus >= 2) {
-      setRlPlacement((prev) => ({ ...prev, groups: `${totalGpus - 1},1` }));
-    }
-  }, [isOnlineRl, rlPlacement.groups, totalGpus]);
+    if (!isOnlineRl) return;
+    const segmentCount = rlInfo.valid ? (rlPlacement.placement === 'colocate' ? 1 : 2) + rlInfo.auxSegments.length : 0;
+    if (rlInfo.valid && segmentCount === expectedSegments) return;
+    const others = expectedSegments - 1;
+    const defaultGroups = [Math.max(1, totalGpus - others), ...Array.from({ length: others }, () => 1)].join(',');
+    if (rlPlacement.groups !== defaultGroups) setRlPlacement((prev) => ({ ...prev, groups: defaultGroups }));
+  }, [isOnlineRl, rlInfo, expectedSegments, rlPlacement.placement, rlPlacement.groups, totalGpus]);
   /* orm/prm 规则名注册表：一次拉取缓存（失败降级空清单——条目将全按模型 id 处理） */
   useEffect(() => {
     let alive = true;
@@ -1007,6 +1021,9 @@ export function TrainNewPage() {
                     onPlanChange={setPlan}
                     cards={gpuSel.mode === 'local' ? gpuSel.cards : []}
                     totalCards={Math.max(1, isOnlineRl && rlInfo.valid ? rlInfo.totalCards : totalGpus)}
+                    cardsPool={isOnlineRl ? totalGpus : undefined}
+                    placement={isOnlineRl ? rlPlacement : undefined}
+                    onPlacementCommit={isOnlineRl ? (seg) => setRlPlacement((prev) => ({ ...prev, groups: seg })) : undefined}
                     memory={{
                       tuner,
                       loraRank,

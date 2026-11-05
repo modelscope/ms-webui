@@ -16,8 +16,9 @@ import { SegmentedControl } from '@/components/FormField';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import type { ModelStructure } from '@/api/train';
 import { fmtBytes, fmtParams } from './memoryEstimate';
+import type { RlPlacement } from './RlGpuPlanner';
 import {
-  DIM_TABLE, defaultSpecFor, efficiencyEstimate, specFits, specToString, specWorld,
+  DIM_TABLE, defaultSpecFor, deriveSegments, efficiencyEstimate, specToString, specWorld,
   type Backend, type ParallelPlan, type PlannerGroup, type SpecDims,
 } from './parallelSpec';
 
@@ -105,6 +106,18 @@ function TopologySvg({ groups, plan, cards, totalCards }: {
         const engineWorld = row.vllm ? row.vllm.dp * row.vllm.tp * row.vllm.pp : 0;
         const tp = row.vllm ? row.vllm.tp : (spec?.tp ?? 1);
         const pp = row.vllm ? row.vllm.pp : (spec?.pp ?? 1);
+        /* 子组归属标注（对齐 DeviceMesh.from_sizes 的 rank 布局：tp 最内、cp 次之、
+         * dp/fsdp 再次、pp 最外）：每卡标 dp 副本号与 pp 段号；vllm 行仅标引擎实际占用的卡 */
+        const cp = row.vllm ? 1 : (spec?.cp ?? 1);
+        const dpTotal = row.vllm ? row.vllm.dp : (spec?.dp ?? 1) * (spec?.fsdp ?? 1);
+        const engineLimit = row.vllm ? engineWorld : n;
+        const subOf = (i: number): string => {
+          if (i >= engineLimit) return '';
+          const parts: string[] = [];
+          if (dpTotal > 1) parts.push(`d${Math.floor(i / (cp * tp))}`);
+          if (pp > 1) parts.push(`p${Math.floor(i / (dpTotal * cp * tp))}`);
+          return parts.join('·');
+        };
         return (
           <g key={g.key + r}>
             <rect x={148} y={y - 8} width={n * (CARD_W + CARD_GAP) - CARD_GAP + 8} height={CARD_H + 16} rx={8}
@@ -117,15 +130,24 @@ function TopologySvg({ groups, plan, cards, totalCards }: {
               const x = 152 + i * (CARD_W + CARD_GAP);
               const base = row.ranks[0] ?? 0;
               const cardNo = cards.length > i + base ? cards[base + i] : null;
+              const sub = subOf(i);
               return (
                 <g key={i}>
+                  {/* DP 副本边界（虚竖线）：左右两卡分属不同数据并行副本，无互联 */}
+                  {dpTotal > 1 && i > 0 && i < engineLimit && i % (cp * tp) === 0 && (
+                    <line x1={x - CARD_GAP / 2} y1={y - 8} x2={x - CARD_GAP / 2} y2={y + CARD_H + 8}
+                      stroke="currentColor" strokeDasharray="3 3" strokeWidth={1} opacity={0.25} />
+                  )}
                   <rect x={x} y={y} width={CARD_W} height={CARD_H} rx={4}
                     fill={row.colocate ? g.color + '26' : g.color + '33'} stroke={g.color} strokeWidth={1}
                     opacity={row.colocate ? 0.75 : row.vllm && i >= engineWorld ? 0.3 : 1}
                     strokeDasharray={row.vllm && i >= engineWorld ? '3 2' : undefined} />
-                  <text x={x + CARD_W / 2} y={y + CARD_H / 2 - 2} textAnchor="middle" className="fill-foreground" style={{ fontSize: 10, fontWeight: 600 }}>
+                  <text x={x + CARD_W / 2} y={y + CARD_H / 2 - (sub ? 4 : 2)} textAnchor="middle" className="fill-foreground" style={{ fontSize: 10, fontWeight: 600 }}>
                     {cardNo !== null ? t('planner.cardLabel', { no: cardNo }) : `r${row.ranks[i] ?? i}`}
                   </text>
+                  {sub && (
+                    <text x={x + CARD_W / 2} y={y + CARD_H / 2 + 7} textAnchor="middle" className="fill-muted-foreground" style={{ fontSize: 7 }}>{sub}</text>
+                  )}
                   {tp > 1 && i < n - 1 && (i + 1) % tp !== 0 && (
                     <line x1={x + CARD_W} y1={y + CARD_H / 2} x2={x + CARD_W + CARD_GAP} y2={y + CARD_H / 2} stroke={g.color} strokeWidth={1.6} />
                   )}
@@ -148,13 +170,15 @@ function TopologySvg({ groups, plan, cards, totalCards }: {
         </g>
       )}
       {/* 图例 */}
-      <g transform={`translate(${width - 140}, ${height - 14})`}>
+      <g transform={`translate(${width - 260}, ${height - 14})`}>
         <line x1={0} y1={0} x2={18} y2={0} stroke="currentColor" strokeWidth={1.6} opacity={0.6} />
         <text x={22} y={3} className="fill-muted-foreground" style={{ fontSize: 9 }}>{t('planner.legendTp')}</text>
         <path d="M 60 -3 l 6 -3 l 0 6 z" fill="currentColor" opacity={0.6} />
         <text x={70} y={3} className="fill-muted-foreground" style={{ fontSize: 9 }}>{t('planner.legendPp')}</text>
         <line x1={118} y1={0} x2={136} y2={0} stroke="currentColor" strokeDasharray="5 3" strokeWidth={1.2} opacity={0.6} />
         <text x={140} y={3} className="fill-muted-foreground" style={{ fontSize: 9 }}>{t('planner.legendColocate')}</text>
+        <line x1={192} y1={-6} x2={192} y2={6} stroke="currentColor" strokeDasharray="3 3" strokeWidth={1} opacity={0.5} />
+        <text x={198} y={3} className="fill-muted-foreground" style={{ fontSize: 9 }}>{t('planner.legendDp')}</text>
       </g>
     </svg>
   );
@@ -175,6 +199,11 @@ export function ParallelPlanner({
   totalCards,
   /* 显存估算输入（训练组口径） */
   memory,
+  /* 卡池总量（派生卡数的预算上限）；缺省用 totalCards（非在线 RL 单组 = 卡池） */
+  cardsPool,
+  /* 在线 RL 的放置值与确认写回：组卡数派生自 spec，确认时重写分段串 */
+  placement,
+  onPlacementCommit,
 }: {
   model: string;
   structure: ModelStructure | null;
@@ -198,32 +227,88 @@ export function ParallelPlanner({
     /** 训练组每卡显存（按 spec 联动重算），由父组件传入或内部计算 */
     estimate: (spec: SpecDims, zero: number) => { perCard: number; weights: number; grads: number; optimizer: number; activations: number; ctx: number } | null;
   };
+  /** 卡池总量（预算约束）；缺省用 totalCards */
+  cardsPool?: number;
+  /** 在线 RL 的放置值（确认时分段串由派生值重写）；缺省 = 非在线 RL */
+  placement?: RlPlacement;
+  /** 确认回调：将派生的分段串写回 rlPlacement.groups */
+  onPlacementCommit?: (groups: string) => void;
 }) {
   const { t } = useT();
   const [open, setOpen] = useState(false);
+  /* 草稿态：开弹窗时快照 plan，所有调节只改草稿——确认才落盘，取消/关闭即还原 */
+  const [draft, setDraft] = useState<ParallelPlan>(() => ({ ...plan, specs: { ...plan.specs }, vllmDims: { ...plan.vllmDims } }));
+  const handleOpenChange = (next: boolean): void => {
+    if (next) setDraft({ ...plan, specs: { ...plan.specs }, vllmDims: { ...plan.vllmDims } });
+    setOpen(next);
+  };
   useEffect(() => {
     if (open && model.trim() && !structure && !structureLoading && !structureError) onFetchStructure();
   }, [open, model, structure, structureLoading, structureError, onFetchStructure]);
 
-  const setSpec = (key: string, dim: keyof SpecDims, v: number | boolean) => {
-    const prev = plan.specs[key] ?? defaultSpecFor(groups.find((g) => g.key === key)?.cards ?? 1);
-    onPlanChange({ ...plan, specs: { ...plan.specs, [key]: { ...prev, [dim]: v } as SpecDims } });
+  const pool = cardsPool ?? totalCards;
+  /* 生效组视图（自动 worldsize）：组卡数 = spec 的 rank 维乘积（specs 缺省 = 纯 DP，
+   * 卡数沿用组清单带来的分配）；采样组 disaggregated = 引擎 world，colocate 覆盖训练卡为 0 */
+  const effGroups: PlannerGroup[] = groups.map((g) => {
+    if (g.kind === 'vllm') {
+      return g.cards === 0 ? g : { ...g, cards: draft.vllmDims.dp * draft.vllmDims.tp * draft.vllmDims.pp };
+    }
+    return { ...g, cards: specWorld(draft.specs[g.key] ?? defaultSpecFor(g.cards)) };
+  });
+  /* 卡池预算：某组扩卡时其余组占用扣减后的余额（count>1 的组按每段算） */
+  const othersCards = (g: PlannerGroup): number =>
+    effGroups.filter((x) => x.key !== g.key).reduce((a, x) => a + x.cards * Math.max(1, x.count), 0);
+  const groupBudget = (g: PlannerGroup): number =>
+    Math.max(1, Math.floor((pool - othersCards(g)) / Math.max(1, g.count)));
+  const actorEffCards = effGroups.find((g) => g.key === 'model')?.cards ?? 0;
+  const engineWorld = draft.vllmDims.dp * draft.vllmDims.tp * draft.vllmDims.pp;
+  const colocateSampler = effGroups.some((g) => g.key === 'sampler' && g.cards === 0);
+  /* 超限（确认禁用）：合计超卡池；colocate 引擎 world 超训练组卡数（sampler_world ≤ nproc 硬约束） */
+  const totalEffCards = effGroups.reduce((a, g) => a + g.cards * Math.max(1, g.count), 0);
+  const poolOverflow = totalEffCards > pool;
+  const colocateOverflow = colocateSampler && engineWorld > actorEffCards;
+  const canConfirm = !poolOverflow && !colocateOverflow;
+
+  /* 确认：草稿落盘（并行计划 + 派生分段串），关闭弹窗 */
+  const commit = (): void => {
+    onPlanChange(draft);
+    if (placement && onPlacementCommit) {
+      onPlacementCommit(deriveSegments(draft, groups, placement.placement));
+    }
+    setOpen(false);
   };
-  const modelGroup = groups.find((g) => g.key === 'model');
-  const modelSpec = plan.specs.model ?? defaultSpecFor(modelGroup?.cards ?? 1);
+
+  const setSpec = (key: string, dim: keyof SpecDims, v: number | boolean) => {
+    const g = groups.find((x) => x.key === key);
+    const prev = draft.specs[key] ?? defaultSpecFor(g?.cards ?? 1);
+    const next = { ...prev, [dim]: v } as SpecDims;
+    /* 自动 worldsize：调非 dp 的 rank 维时 dp 自动吸收、组卡数不变；余数卡
+     * 放不下时不吸收（world 变大），交给卡池超限告警与确认门禁 */
+    const meta = DIM_TABLE.find((d) => d.key === dim);
+    if (meta?.rank && dim !== 'dp') {
+      const rest = specWorld({ ...next, dp: 1 });
+      const world = specWorld(prev);
+      if (rest > 0 && world % rest === 0) next.dp = world / rest;
+    }
+    setDraft({ ...draft, specs: { ...draft.specs, [key]: next } });
+  };
+  const modelGroup = effGroups.find((g) => g.key === 'model');
+  const modelSpec = draft.specs.model ?? defaultSpecFor(modelGroup?.cards ?? 1);
   /* 显存：spec 映射（fsdp>1 ≈ ZeRO3 分片；cp 并入激活缩减） */
-  const est = memory.estimate(modelSpec, plan.zero);
+  const est = memory.estimate(modelSpec, draft.zero);
   const eff = efficiencyEstimate(modelSpec);
-  const backend = plan.backend;
+  const backend = draft.backend;
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm" className="h-7 gap-1.5 px-2.5 text-[12px]">
           <Cpu className="size-3.5" /> {t('planner.triggerLabel')}{groups.length > 1 ? t('planner.groupCountSuffix', { n: groups.length }) : ''}
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-4xl">
+      {/* sm: 变体必须显式覆盖（基类 sm:max-w-lg 与 max-w-* 不同断点，cn 不会互相顶掉），
+          否则桌面端弹窗被钉在 32rem 宽，内容撑破背景框 */}
+      <DialogContent className="max-h-[calc(100vh-4rem)] overflow-y-auto sm:max-w-6xl">
         <DialogHeader>
           <DialogTitle>{t('planner.title', { model })}</DialogTitle>
           <DialogDescription>
@@ -235,7 +320,7 @@ export function ParallelPlanner({
           <div className="flex flex-wrap items-center gap-3">
             <SegmentedControl
               value={backend}
-              onChange={(v) => onPlanChange({ ...plan, backend: v as Backend })}
+              onChange={(v) => setDraft({ ...draft, backend: v as Backend })}
               options={[
                 { value: 'transformers', label: 'transformers（hf）' },
                 { value: 'megatron', label: 'megatron' },
@@ -249,75 +334,95 @@ export function ParallelPlanner({
             {backend === 'megatron' && <span className="text-amber-600 dark:text-amber-400 text-[11px]">{t('planner.megatronFlag')}</span>}
           </div>
 
-          {/* 组清单：每组一块调节区 */}
-          <div className="space-y-2.5">
-            {groups.map((g) => {
-              const spec = plan.specs[g.key] ?? defaultSpecFor(g.cards);
-              const fits = g.kind === 'mesh' ? specFits(plan.specs[g.key] ?? defaultSpecFor(g.cards), g.cards) : true;
-              const flagText = g.kind === 'vllm'
-                ? `--vllm_data_parallel_size ${plan.vllmDims.dp}${plan.vllmDims.tp > 1 ? ` · --vllm_tensor_parallel_size ${plan.vllmDims.tp}` : ''}${plan.vllmDims.pp > 1 ? ` · --vllm_pipeline_parallel_size ${plan.vllmDims.pp}` : ''}`
-                : `--${g.flag} ${specToString(spec) ?? t('planner.specFlagDefault')}`;
-              return (
-                <div key={g.key} className="border-border/60 rounded-lg border p-3" style={{ borderLeft: `3px solid ${g.color}` }}>
-                  <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <span className="text-[13px] font-semibold">{t(g.label)}{g.count > 1 && <span className="text-muted-foreground font-normal"> ×{g.count}</span>}</span>
-                    {g.detail && <span className="text-muted-foreground text-[11px]">{t(g.detail.key, g.detail.vars)}</span>}
-                    <span className="text-muted-foreground text-[11px]">{t('planner.cardsPerGroup', { n: g.cards })}</span>
-                    <code className="bg-muted/60 rounded px-1.5 py-0.5 font-mono text-[11px]">{flagText}</code>
-                    {!fits && <span className="text-destructive text-[11px] font-medium">{t('planner.specFit', { cards: g.cards, world: specWorld(spec) })}</span>}
-                  </div>
-                  {g.kind === 'vllm' ? (
-                    <div className="flex flex-wrap items-center gap-3">
-                      <DimStepper label={t('planner.dpLabel')} value={plan.vllmDims.dp} max={32} onChange={(v) => onPlanChange({ ...plan, vllmDims: { ...plan.vllmDims, dp: v } })} title="vllm_data_parallel_size" />
-                      <DimStepper label="tp" value={plan.vllmDims.tp} max={8} onChange={(v) => onPlanChange({ ...plan, vllmDims: { ...plan.vllmDims, tp: v } })} title={t('planner.tpTitle')} />
-                      <DimStepper label="pp" value={plan.vllmDims.pp} max={4} onChange={(v) => onPlanChange({ ...plan, vllmDims: { ...plan.vllmDims, pp: v } })} title="vllm_pipeline_parallel_size" />
-                      <span className={`text-[11px] ${g.cards === 0 || plan.vllmDims.dp * plan.vllmDims.tp * plan.vllmDims.pp === g.cards ? 'text-muted-foreground' : 'text-destructive font-medium'}`}>
-                        {g.cards === 0
-                          ? t('planner.colocateNote')
-                          : t('planner.engineWorld', { world: plan.vllmDims.dp * plan.vllmDims.tp * plan.vllmDims.pp, cards: g.cards })}
-                      </span>
+          {/* 主体两栏：左为组调节区、右为卡连接拓扑（窄屏退化为堆叠） */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            {/* 组清单：每组一块调节区 */}
+            <div className="min-w-0 space-y-2.5">
+              {effGroups.map((g) => {
+                const spec = draft.specs[g.key] ?? defaultSpecFor(g.cards);
+                const flagText = g.kind === 'vllm'
+                  ? `--vllm_data_parallel_size ${draft.vllmDims.dp}${draft.vllmDims.tp > 1 ? ` · --vllm_tensor_parallel_size ${draft.vllmDims.tp}` : ''}${draft.vllmDims.pp > 1 ? ` · --vllm_pipeline_parallel_size ${draft.vllmDims.pp}` : ''}`
+                  : `--${g.flag} ${specToString(spec) ?? t('planner.specFlagDefault')}`;
+                /* transformers 只渲染可用维；megatron 全套但剔除 ul——ulysses 是
+                 * transformers 专有维（device_mesh 标注 transformers only），megatron 下是死维 */
+                const dims = DIM_TABLE.filter((d) => (backend === 'megatron' ? d.key !== 'ul' : d.tf));
+                /* 派生卡数超限告警：该组占用 + 其余组占用 > 卡池 */
+                const overPool = g.cards * Math.max(1, g.count) + othersCards(g) > pool;
+                return (
+                  <div key={g.key} className="border-border/60 rounded-lg border p-3" style={{ borderLeft: `3px solid ${g.color}` }}>
+                    {/* 头部单行自适应：左为组名 + 卡数 + 说明，右侧 flag 预览（超长截断、悬停看全文） */}
+                    <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                      <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                        <span className="text-[13px] font-semibold">{t(g.label)}{g.count > 1 && <span className="text-muted-foreground font-normal"> ×{g.count}</span>}</span>
+                        <span className="text-muted-foreground text-[11px]">{t('planner.cardsPerGroup', { n: g.cards })}</span>
+                        {g.detail && <span className="text-muted-foreground text-[11px]">{t(g.detail.key, g.detail.vars)}</span>}
+                      </div>
+                      <code className="bg-muted/60 min-w-0 truncate rounded px-1.5 py-0.5 font-mono text-[11px]" title={flagText}>{flagText}</code>
                     </div>
-                  ) : (
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                      {DIM_TABLE.map((d) => (
-                        <DimStepper
-                          key={d.key}
-                          label={d.label}
-                          value={spec[d.key] as number}
-                          max={64}
-                          disabled={backend === 'transformers' && !d.tf}
-                          title={backend === 'transformers' && !d.tf ? t('planner.dimDisabledTitle') : d.rank ? t('planner.dimRankTitle') : t('planner.dimMeshTitle')}
-                          onChange={(v) => setSpec(g.key, d.key, v)}
-                        />
-                      ))}
-                      {backend === 'transformers' && g.key === 'model' && (
-                        <div className="flex items-center gap-1">
-                          <span className="text-muted-foreground w-10 font-mono text-[11px]">ZeRO</span>
-                          <SegmentedControl
-                            value={String(plan.zero)}
-                            onChange={(v) => onPlanChange({ ...plan, zero: Number(v) as ParallelPlan['zero'] })}
-                            options={[0, 1, 2, 3].map((z) => ({ value: String(z), label: String(z) }))}
-                          />
+                    {overPool && <p className="text-destructive mt-1 text-[11px] font-medium">{t('planner.poolOverflow', { total: g.cards * Math.max(1, g.count) + othersCards(g), pool })}</p>}
+                    {g.kind === 'vllm' ? (
+                      <>
+                        <div className="mt-2 grid grid-cols-3 gap-x-3">
+                          {/* dp = 副本数即段宽：colocate 受训练组卡数硬约束，独立分片受卡池预算 */}
+                          <DimStepper label={t('planner.dpLabel')} value={draft.vllmDims.dp}
+                            max={g.cards === 0
+                              ? Math.max(1, Math.floor(actorEffCards / Math.max(1, draft.vllmDims.tp * draft.vllmDims.pp)))
+                              : Math.max(1, Math.floor(groupBudget(g) / Math.max(1, draft.vllmDims.tp * draft.vllmDims.pp)))}
+                            onChange={(v) => setDraft({ ...draft, vllmDims: { ...draft.vllmDims, dp: v } })} title="vllm_data_parallel_size" />
+                          <DimStepper label="tp" value={draft.vllmDims.tp} max={8} onChange={(v) => setDraft({ ...draft, vllmDims: { ...draft.vllmDims, tp: v } })} title={t('planner.tpTitle')} />
+                          <DimStepper label="pp" value={draft.vllmDims.pp} max={4} onChange={(v) => setDraft({ ...draft, vllmDims: { ...draft.vllmDims, pp: v } })} title="vllm_pipeline_parallel_size" />
                         </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {groups.length === 0 && <p className="text-muted-foreground text-sm">{t('planner.emptyGroups')}</p>}
-          </div>
+                        <p className="mt-1.5 text-[11px] text-muted-foreground">
+                          {g.cards === 0 ? t('planner.colocateNote') : t('planner.engineWorld', { world: engineWorld, cards: g.cards })}
+                        </p>
+                        {colocateOverflow && g.cards === 0 && (
+                          <p className="mt-0.5 text-[11px] font-medium text-destructive">{t('planner.colocateOverflow', { world: engineWorld, cards: actorEffCards })}</p>
+                        )}
+                        {draft.vllmDims.pp > 1 && (
+                          <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">{t('planner.vllmPpNote')}</p>
+                        )}
+                      </>
+                    ) : (
+                      <div className="mt-2 grid grid-cols-4 gap-x-3 gap-y-1.5">
+                        {dims.map((d) => (
+                          <DimStepper
+                            key={d.key}
+                            label={d.label}
+                            value={spec[d.key] as number}
+                            max={d.key === 'dp' ? Math.max(1, Math.floor(groupBudget(g) / Math.max(1, specWorld({ ...spec, dp: 1 })))) : 64}
+                            title={d.rank ? t('planner.dimRankTitle') : t('planner.dimMeshTitle')}
+                            onChange={(v) => setSpec(g.key, d.key, v)}
+                          />
+                        ))}
+                        {backend === 'transformers' && g.key === 'model' && (
+                          <div className="col-span-2 flex items-center gap-1">
+                            <span className="text-muted-foreground w-10 font-mono text-[11px]">ZeRO</span>
+                            <SegmentedControl
+                              value={String(draft.zero)}
+                              onChange={(v) => setDraft({ ...draft, zero: Number(v) as ParallelPlan['zero'] })}
+                              options={[0, 1, 2, 3].map((z) => ({ value: String(z), label: String(z) }))}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {effGroups.length === 0 && <p className="text-muted-foreground text-sm">{t('planner.emptyGroups')}</p>}
+            </div>
 
-          {/* SVG 卡连接拓扑 */}
-          <div>
-            <div className="text-muted-foreground mb-1 text-[11px] font-medium tracking-[0.08em] uppercase">{t('planner.topologyTitle')}</div>
-            <div className="bg-muted/30 rounded-lg border p-2">
-              <TopologySvg groups={groups} plan={plan} cards={cards} totalCards={Math.max(1, totalCards)} />
+            {/* SVG 卡连接拓扑（容器内横向滚动，minWidth 不再撑破弹窗背景）：吃派生视图与草稿 */}
+            <div className="min-w-0">
+              <div className="text-muted-foreground mb-1 text-[11px] font-medium tracking-[0.08em] uppercase">{t('planner.topologyTitle')}</div>
+              <div className="bg-muted/30 overflow-x-auto rounded-lg border p-2">
+                <TopologySvg groups={effGroups} plan={draft} cards={cards} totalCards={Math.max(1, totalCards)} />
+              </div>
             </div>
           </div>
 
           {/* 显存与效率 */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid gap-4 sm:grid-cols-2">
             <div>
               <div className="text-muted-foreground mb-1 text-[11px] font-medium tracking-[0.08em] uppercase">{t('planner.memTitle')}</div>
               {structureLoading && <div className="text-muted-foreground flex items-center gap-2 text-sm"><Loader2 className="size-4 animate-spin" /> {t('planner.probing')}</div>}
@@ -362,6 +467,13 @@ export function ParallelPlanner({
                 ))}
               <p className="text-muted-foreground/70 mt-1 text-[10px]">{t('planner.effNote')}</p>
             </div>
+          </div>
+
+          {/* 确认 / 取消：草稿落盘或还原（Esc / 右上角关闭同取消） */}
+          <div className="border-border/60 flex items-center justify-end gap-2 border-t pt-3">
+            {poolOverflow && <p className="text-destructive mr-auto text-[11px] font-medium">{t('planner.poolOverflow', { total: totalEffCards, pool })}</p>}
+            <Button variant="outline" size="sm" onClick={() => setOpen(false)}>{t('planner.cancelBtn')}</Button>
+            <Button size="sm" disabled={!canConfirm} onClick={commit}>{t('planner.confirmBtn')}</Button>
           </div>
         </div>
       </DialogContent>

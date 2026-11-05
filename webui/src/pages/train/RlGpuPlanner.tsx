@@ -1,9 +1,8 @@
 /**
- * 在线 RL（grpo/ppo/rft/gkd/opsd/mopd）的 actor/sampler 双组配卡规划器。
- * 「每组卡数」一个输入框、逗号分割：段 1 = 训练组（--nproc_per_node）、
- * 段 2 = 采样组（组内副本 × TP 宽的切分在「显卡与分片分组」弹窗里调节，
- * 生成 vllm_* 引擎 flag）、段 3+ = 辅助组（教师/ref/reward，spec 同在弹窗
- * 调节）。本组件只管组边界（每组卡数）与数量关系校验；组内并行归弹窗。
+ * 在线 RL（grpo/ppo/rft/gkd/opsd/mopd）的 actor/sampler 双组放置规划器。
+ * 本组件只管放置形态（colocate / 独立分片）与分段串的数量关系校验、摘要；
+ * 每组卡数的步进调节在「显卡与分片分组」弹窗里（写回分段串），组内并行
+ * （spec / vllm 引擎形状）同在弹窗。
  *
  * 放置语义对齐 swift plan_device_groups：colocate 时采样组覆盖在训练组
  * 卡上时间分片（CLI 缺省即 colocate）；独立分片时各组 ranks 前后相接、
@@ -11,7 +10,6 @@
  */
 import { Field, SegmentedControl } from '@/components/FormField';
 import { useT, type MessageKey } from '@/i18n';
-import { Input } from '@/components/ui/input';
 
 /* 纯函数收翻译函数：错误文案带插值，无法延迟到渲染处 */
 type TFn = (key: MessageKey, vars?: Record<string, string | number>) => string;
@@ -128,18 +126,7 @@ export function RlGpuPlanner({
           ]}
         />
       </Field>
-      <Field
-        label={t('rl.cardsPerGroup')}
-        hint={value.placement === 'disaggregated' ? t('rl.cardsHintDis') : t('rl.cardsHintCo')}
-      >
-        <Input
-          value={value.groups}
-          onChange={(e) => onChange({ ...value, groups: e.target.value })}
-          placeholder={value.placement === 'disaggregated' ? `${Math.max(1, totalGpus - 1)},1` : String(Math.max(1, totalGpus))}
-          className="border-border bg-background font-mono text-sm"
-          inputMode="numeric"
-        />
-      </Field>
+      <p className="text-muted-foreground text-[11px]">{t('rl.cardsMovedNote')}</p>
       {info.valid ? (
         <p className="text-muted-foreground text-[12px] leading-5">
           {value.placement === 'colocate' ? (
