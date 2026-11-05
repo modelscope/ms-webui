@@ -1589,8 +1589,35 @@ const trainTasks = new Map<string, TrainTask>();
  */
 const metricsFileMtime = new Map<string, number>();
 
+/*
+ * metrics.jsonl 的落点：训练侧 StepState 写在版本目录 <output_dir>/v0-<ts>/ 下
+ * （outputDir 本身只是父目录），早期平铺形态 <output_dir>/metrics.jsonl 兼容保留。
+ * 多个版本目录（resume 会新开一个）取 mtime 最新的那份。
+ */
+function locateMetricsFile(outputDir: string): string | null {
+  let best: { file: string; mtimeMs: number } | null = null;
+  const consider = (file: string): void => {
+    try {
+      const st = statSync(file);
+      if (!best || st.mtimeMs > best.mtimeMs) best = { file, mtimeMs: st.mtimeMs };
+    } catch {
+      /* 该落点不存在：试下一个 */
+    }
+  };
+  consider(join(outputDir, 'metrics.jsonl'));
+  try {
+    for (const d of readdirSync(outputDir)) {
+      consider(join(outputDir, d, 'metrics.jsonl'));
+    }
+  } catch {
+    /* outputDir 不可读或不存在：平铺落点已试过 */
+  }
+  return best ? best.file : null;
+}
+
 function syncTrainMetricsFile(task: TrainTask): void {
-  const file = join(task.outputDir, 'metrics.jsonl');
+  const file = locateMetricsFile(task.outputDir);
+  if (!file) return;
   try {
     const st = statSync(file);
     if (metricsFileMtime.get(task.id) === st.mtimeMs) return;
