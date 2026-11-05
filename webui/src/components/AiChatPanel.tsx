@@ -29,7 +29,7 @@ export interface AiMessage<A> {
   id: string;
   role: 'user' | 'assistant';
   text: string;
-  /** 附带的提议。每条独立确认，不是打包应用 */
+  /** 附带的提议。逐条确认；批量出口只是替用户连发逐条，语义相同 */
   actions?: A[];
   /** 与 actions 同长度，记录每条被点了什么 */
   states?: ActionState[];
@@ -179,7 +179,10 @@ export function AiChatPanel<A>({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-auto px-3.5 pt-3.5 pb-1">
-        {messages.map((m) => (
+        {messages.map((m) => {
+          /* 本条消息仍待确认的提议序号：多于一条时给批量出口 */
+          const pendingIdx = m.actions?.map((_, i) => i).filter((i) => (m.states?.[i] ?? 'pending') === 'pending') ?? [];
+          return (
           <div key={m.id}>
             <div className={cn('flex gap-2.5', m.role === 'user' && 'flex-row-reverse')}>
               <span
@@ -244,10 +247,35 @@ export function AiChatPanel<A>({
                     onIgnore={() => onAction(m.id, i, 'ignored')}
                   />
                 ))}
+                {/*
+                  * 批量出口：一套配置动辄几十条提议，逐条点太磨手。只是把逐条
+                  * 确认连发一遍（onAction 逐条走），不是绕过确认的打包应用；
+                  * 单条待决时不出——那张卡自己有按钮。
+                  */}
+                {confirmBeforeApply && pendingIdx.length > 1 && (
+                  <div className="flex gap-1.5">
+                    <Button
+                      size="sm"
+                      className="h-6 px-2.5 text-xs"
+                      onClick={() => pendingIdx.forEach((i) => onAction(m.id, i, 'applied'))}
+                    >
+                      {t('chatPanel.applyAll')}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-6 px-2.5 text-xs"
+                      onClick={() => pendingIdx.forEach((i) => onAction(m.id, i, 'ignored'))}
+                    >
+                      {t('chatPanel.ignoreAll')}
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
         {/* 尾部插槽（审批卡等）：跟在最新消息后面，输入框上方 */}
         {trailing}
         <div ref={tail} />

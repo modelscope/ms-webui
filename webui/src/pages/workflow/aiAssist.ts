@@ -9,6 +9,7 @@ import {
   fetchConvBuckets,
   fetchPendingPageTools,
   resolvePageTool,
+  moveConvBuckets,
   type PageToolSpec,
 } from '@/api/turns';
 import type { ChatMessage } from '@/api/models';
@@ -354,6 +355,20 @@ export function useFlowAiChat({
   ctxRef.current = ctx;
   const controlRef = useRef(onControl);
   controlRef.current = onControl;
+
+  /*
+   * 切模型搬桶（模型由页面传入，这里补上）：turns 按会话 × 模型分桶，
+   * 不搬的话新模型的回合读到空桶——界面消息还在，模型却失忆。目标桶已有
+   * 消息不搬（那是该模型自己的流，服务端 move 同语义）；会话不变才搬。
+   * 选择器流式中已禁用，这里不重复守卫。
+   */
+  const prevConvModelRef = useRef({ conv: convId, model });
+  useEffect(() => {
+    const prev = prevConvModelRef.current;
+    prevConvModelRef.current = { conv: convId, model };
+    if (!convId || prev.conv !== convId || !prev.model || !model || prev.model === model) return;
+    void moveConvBuckets(convId, prev.model, model);
+  }, [convId, model]);
 
   /*
    * 页面工具的执行面：引擎把挂起调用上抛（SSE page-tool 事件或恢复重放），

@@ -257,6 +257,8 @@ export const en: Partial<MessageTable> = {
   'chatPanel.demoHint': 'Replies are local demos; backend model not wired',
   'chatPanel.thinking': 'Thinking…',
   'chatPanel.apply': 'Apply',
+  'chatPanel.applyAll': 'Apply all',
+  'chatPanel.ignoreAll': 'Ignore all',
   'chatPanel.applied': 'Applied',
   'chatPanel.stopping': 'Stopping…',
   'chatPanel.stopGen': 'Stop generating',

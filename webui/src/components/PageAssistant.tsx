@@ -10,6 +10,7 @@ import {
   fetchConvBuckets,
   fetchPendingPageTools,
   resolvePageTool,
+  moveConvBuckets,
   type PageToolSpec,
 } from '@/api/turns';
 import { listSkills, buildSkillsSystem } from '@/api/skills';
@@ -255,16 +256,30 @@ export function PageAssistant({
     });
   };
 
-  /* 切模型：换到该模型自己的桶（各模型上下文独立，与首页同构） */
+  /*
+   * 切模型：与首页同语义——目标模型桶空时把当前桶搬过去，聊天记录跟着
+   * 模型走（不搬的话目标桶是空的，记录被开场白顶掉）；目标桶已有消息则
+   * 换到那条流（频道语义，各模型上下文独立）。无会话时没有桶可搬，直换。
+   */
   const switchModel = (id: string) => {
     if (streaming || !id || id === model) return;
-    setModel(id);
     seenPageCalls.current.clear();
-    if (convId) {
-      void fetchConvBuckets(convId).then((buckets) => {
-        restoreConversation(buckets[id] ?? []);
-      });
+    if (!convId) {
+      setModel(id);
+      return;
     }
+    const from = model;
+    void (async () => {
+      const buckets = await fetchConvBuckets(convId);
+      if ((buckets[id] ?? []).length) {
+        setModel(id);
+        restoreConversation(buckets[id] ?? []);
+        return;
+      }
+      /* 桶搬完再切：消息本体不动，界面记录原样保留 */
+      await moveConvBuckets(convId, from, id);
+      setModel(id);
+    })();
   };
 
   /*

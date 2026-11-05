@@ -256,6 +256,8 @@ export const zh = {
   'chatPanel.demoHint': '回答是本地示意，未接后端模型',
   'chatPanel.thinking': '正在想……',
   'chatPanel.apply': '应用',
+  'chatPanel.applyAll': '应用全部',
+  'chatPanel.ignoreAll': '忽略全部',
   'chatPanel.applied': '已应用',
   'chatPanel.stopping': '正在停止…',
   'chatPanel.stopGen': '停止生成',
