@@ -4668,12 +4668,13 @@ function swiftApiPlugin(): Plugin {
           return live;
         }
         /*
-         * 编排会话复用任务守卫：graph 的 resource 段声明本机选卡（resource.gpus
-         * 数字数组）时查卡位冲突；新建会话要跑训练/导出节点，水位同样要查。
+         * 编排会话复用任务守卫：graph 的 resource 段声明本机选卡（resource.cards
+         * 数字数组，见 swift/dev/webui/graph.py 的 resource 声明键）时查卡位冲突；
+         * 新建会话要跑训练/导出节点，水位同样要查。
          * 抛错由外层路由的 catch 统一回给提交方（fail loudly，带可行动文案）。
          */
-        const declaredGpus = Array.isArray(graph?.resource?.gpus)
-          ? (graph.resource.gpus as unknown[]).map((g) => Number(g)).filter((g) => Number.isInteger(g) && g >= 0)
+        const declaredGpus = Array.isArray(graph?.resource?.cards)
+          ? (graph.resource.cards as unknown[]).map((g) => Number(g)).filter((g) => Number.isInteger(g) && g >= 0)
           : undefined;
         const guardErr = gpuConflictError(declaredGpus) ?? diskGuardError();
         if (guardErr) throw new Error(guardErr);
