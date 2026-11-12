@@ -2920,8 +2920,8 @@
           "options": [
             "cross_entropy",
             "channel",
-            "chunked_cross_entropy",
             "mse",
+            "chunked_cross_entropy",
             "grpo",
             "ppo",
             "ppo_value",
@@ -3235,93 +3235,6 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "ENV",
-      "execution": "driver"
-    },
-    "policy_endpoint": {
-      "type": "policy_endpoint",
-      "label": "本地推理服务",
-      "lifecycle": "Resource",
-      "math_doc": "复用常驻 sampler；只管理本会话拥有的应用。",
-      "ports_in": [
-        {
-          "key": "sampler",
-          "kind": "SAMPLER",
-          "role": "服务引擎",
-          "profiles": [],
-          "many": false,
-          "optional": false,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        }
-      ],
-      "ports_out": [
-        {
-          "key": "endpoint",
-          "kind": "ENDPOINT",
-          "role": "就绪端点",
-          "profiles": [],
-          "many": false,
-          "optional": false,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        }
-      ],
-      "params": [
-        {
-          "name": "port",
-          "label": "端口",
-          "default": 8000,
-          "doc": "",
-          "options": [],
-          "group": "",
-          "type": "int",
-          "required": false,
-          "nullable": false,
-          "minimum": 1,
-          "maximum": 65535,
-          "phase": "construct",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        },
-        {
-          "name": "server_config",
-          "label": "服务配置",
-          "default": {},
-          "doc": "",
-          "options": [],
-          "group": "",
-          "type": "dict",
-          "required": false,
-          "nullable": false,
-          "minimum": null,
-          "maximum": null,
-          "phase": "construct",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        }
-      ],
-      "factory": "",
-      "client_factory": "",
-      "effects": [
-        "serve"
-      ],
-      "exclusive_inputs": [],
-      "required_when": [],
-      "owner_kind": "ENDPOINT",
       "execution": "driver"
     },
     "api_endpoint": {
@@ -3856,7 +3769,7 @@
         {
           "key": "source",
           "kind": "SOURCE",
-          "role": "发布与确认控制",
+          "role": "批次确认控制",
           "profiles": [],
           "many": false,
           "optional": false,
@@ -5416,6 +5329,24 @@
           "unique_items": false
         },
         {
+          "name": "num_generations",
+          "label": "分组宽度",
+          "default": 8,
+          "doc": "",
+          "options": [],
+          "group": "",
+          "type": "int",
+          "required": false,
+          "nullable": false,
+          "minimum": 1,
+          "maximum": null,
+          "phase": "call",
+          "secret": false,
+          "item_type": "",
+          "item_options": [],
+          "unique_items": false
+        },
+        {
           "name": "kwargs",
           "label": "估计参数",
           "default": {},
@@ -5461,7 +5392,7 @@
       "type": "signal_combine",
       "label": "数值组合",
       "lifecycle": "Stage",
-      "math_doc": "对齐通道的加权和或概率混合；logps 概率混合使用 logsumexp。",
+      "math_doc": "对齐通道的加权平均（权重为混合系数，同比缩放结果不变）或概率混合；logps 概率混合使用 logsumexp。",
       "ports_in": [
         {
           "key": "signals",
@@ -5698,6 +5629,24 @@
           "name": "top_k",
           "label": "保留数",
           "default": 1,
+          "doc": "",
+          "options": [],
+          "group": "",
+          "type": "int",
+          "required": false,
+          "nullable": false,
+          "minimum": 1,
+          "maximum": null,
+          "phase": "call",
+          "secret": false,
+          "item_type": "",
+          "item_options": [],
+          "unique_items": false
+        },
+        {
+          "name": "num_generations",
+          "label": "分组宽度",
+          "default": 8,
           "doc": "",
           "options": [],
           "group": "",
@@ -6125,7 +6074,7 @@
       "type": "weight_sync",
       "label": "权重同步",
       "lifecycle": "Stage",
-      "math_doc": "经原生分桶传输；流式发布登记、commit 后确认，不虚报 pending 完成。",
+      "math_doc": "经原生分桶传输；同步完成后才确认，不虚报 pending 完成。",
       "ports_in": [
         {
           "key": "model",
@@ -6525,6 +6474,24 @@
             "model",
             "training"
           ],
+          "group": "",
+          "type": "str",
+          "required": false,
+          "nullable": false,
+          "minimum": null,
+          "maximum": null,
+          "phase": "call",
+          "secret": false,
+          "item_type": "",
+          "item_options": [],
+          "unique_items": false
+        },
+        {
+          "name": "output_dir",
+          "label": "输出目录",
+          "default": "output/checkpoints",
+          "doc": "",
+          "options": [],
           "group": "",
           "type": "str",
           "required": false,

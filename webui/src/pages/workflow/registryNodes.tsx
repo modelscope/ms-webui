@@ -196,10 +196,6 @@ const UI_EXTRAS: Record<string, UiExtras> = {
     category: 'wf.catAgentEnv', labelKey: 'wf.nodeSandboxEnv', color: COLORS.agent, icon: <Globe />, runnable: true,
     hint: 'wf.hintSandboxEnv',
   },
-  policy_endpoint: {
-    category: 'wf.catAgentEnv', labelKey: 'wf.nodePolicyEndpoint', color: COLORS.agent, icon: <Rocket />, runnable: true,
-    hint: 'wf.hintPolicyEndpoint',
-  },
   api_endpoint: {
     category: 'wf.catInput', labelKey: 'wf.nodeApiModel', color: COLORS.input, icon: <Globe />,
     hint: 'wf.hintApiModel',
