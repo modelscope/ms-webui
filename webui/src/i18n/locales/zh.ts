@@ -1068,7 +1068,7 @@ export const zh = {
   'wf.hintMultiTurnRollout': '模型发工具调用、环境回 observation，来回跑 max_turns 轮；账本产出可训练轨迹',
   'wf.hintExternalRollout': '控制反转：外部 agent 程序驱动 episode、打策略端点，每轮回传一条可训练轨迹',
   'wf.hintChallenger': 'RSI 自动出题器：沙箱内先做 → 验证 → 描述成任务；rubric 评委过滤，数据分布自进化而策略仍是唯一被训练者',
-  'wf.hintAdvantage': '纯数据面变换：读样本上的打分与通道前向，产出优势四元组。换 GAE/RLOO 就是换这里的参数（蒸馏族用教师信号节点）',
+  'wf.hintAdvantage': '纯数据面变换：读行对齐打分与通道前向，产出优势四元组。换 GAE/RLOO 就是换这里的参数（蒸馏族用教师信号节点）',
   'wf.hintTeacherSignal': '教师前向产 signal 并组装训练批：GKD 走全词表 logits，OPSD/MOPD 走 response-only logps；无优势阶段',
   'wf.hintRewardScorer': 'r(τ)→标量列：注册名构造或自定义代码 def score(rows)；score 节点按接线顺序输出多列评分',
   'wf.hintTrainStep': '骨架固定不变量（GA 边界、publish 与 commit 的配对）；发布按 cadence 触发权重同步',

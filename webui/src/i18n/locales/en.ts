@@ -1067,7 +1067,7 @@ export const en: Partial<MessageTable> = {
   'wf.hintMultiTurnRollout': 'The model issues tool calls, the environment replies with observations, back and forth for max_turns rounds; the ledger produces trainable trajectories',
   'wf.hintExternalRollout': 'Inversion of control: an external agent program drives episodes against the policy endpoint, returning one trainable trajectory per round',
   'wf.hintChallenger': 'RSI auto challenger: solve it in the sandbox first → verify → describe as a task; filtered by the rubric judge, the data distribution self-evolves while the policy remains the only trainee',
-  'wf.hintAdvantage': 'Pure data-plane transform: reads the scores on samples and channel forwards, producing the advantage quadruple. Switching to GAE/RLOO is just changing params here (distillation families use the teacher-signal node)',
+  'wf.hintAdvantage': 'Pure data-plane transform: reads the row-aligned scores and channel forwards, producing the advantage quadruple. Switching to GAE/RLOO is just changing params here (distillation families use the teacher-signal node)',
   'wf.hintTeacherSignal': 'Teacher forward produces the signal and assembles the training batch: GKD on full-vocab logits, OPSD/MOPD on response-only logps; no advantage stage',
   'wf.hintRewardScorer': 'r(τ) → scalar column: a registered rule by name or user code def score(rows); the score node emits one column per wired scorer, in wire order',
   'wf.hintTrainStep': 'The skeleton fixes the invariants (GA boundaries, publish/commit pairing); publishing triggers weight sync on cadence',
