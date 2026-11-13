@@ -332,7 +332,7 @@ function Canvas({
       const pa = findPortOf(a, fromPort, 'out');
       const pb = findPortOf(b, toPort, 'in');
       if (!pa || !pb) return t('wf.errPortMissing');
-      if (pa.type !== pb.type) {
+      if (pa.type !== pb.type && !(pb.acceptedKinds ?? []).includes(pa.type)) {
         return t('wf.errTypeMismatch', { a: t(PORT_TYPES[pa.type].label), b: t(PORT_TYPES[pb.type].label) });
       }
       /*

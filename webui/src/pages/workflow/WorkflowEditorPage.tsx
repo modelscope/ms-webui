@@ -298,7 +298,8 @@ export function WorkflowEditorPage() {
         setFlowName(flow.name);
         /* v5 前的历史图（缺 version 字段按 v4 记）：先走后端升级服务出副本，
          * 不拿 label/value 编辑态直接当执行声明——声明转换在后端 normalizeGraph。 */
-        const rawVersion = Number.isInteger(flow.graph.version) ? flow.graph.version : 4;
+        const rawVersion = typeof flow.graph.version === 'number' && Number.isInteger(flow.graph.version)
+          ? flow.graph.version : 4;
         if (rawVersion < 5) {
           try {
             const preview = await upgradeWorkflowGraph({ ...flow.graph, version: rawVersion });
@@ -313,9 +314,12 @@ export function WorkflowEditorPage() {
             if (!cancelled) toast.error(String(error));
           }
         }
-        /* graph state 的形态是 Preset（画布三件套 + 脚手架元信息）：只换三件套 */
+        /* graph state 的形态是 Preset（画布三件套 + 脚手架元信息）：只换三件套；
+         * version 记下画布真实的声明版本——未应用升级副本前保存/提交都写回它，
+         * 重读才会再次触发升级，退路不被版本盖章烧断。 */
         setGraph((g) => ({
           ...g,
+          version: rawVersion,
           nodes: Array.isArray(flow.graph.nodes) ? (flow.graph.nodes as GraphNode[]) : [],
           edges: Array.isArray(flow.graph.edges) ? (flow.graph.edges as GraphEdge[]) : [],
           frames: Array.isArray(flow.graph.frames) ? (flow.graph.frames as GraphFrame[]) : [],
@@ -362,8 +366,9 @@ export function WorkflowEditorPage() {
   );
   const code = useMemo(() => graphToCode(nodes, edges, displayName), [nodes, edges, displayName]);
 
-  /** 画布三件套的持久化形态（frames 为空时不带键；version 带上，重读时免升级） */
-  const graphOut = (): FlowGraph => ({ version: 5, nodes, edges, ...(frames.length ? { frames } : {}) });
+  /** 画布三件套的持久化形态（frames 为空时不带键；version 写画布真实版本——
+   * 未升级的旧图存回去仍是旧版本，重读时升级流会再次接管，而不是被盖成 v5） */
+  const graphOut = (): FlowGraph => ({ version: graph.version ?? 5, nodes, edges, ...(frames.length ? { frames } : {}) });
 
   /*
    * 保存实验：画布形态连同名称写回 flows 持久层。带 :id 的路由直接覆盖；
@@ -397,6 +402,7 @@ export function WorkflowEditorPage() {
     if (!upgradeOffer) return;
     setGraph((g) => ({
       ...g,
+      version: upgradeOffer.candidate.version,
       nodes: canvasNodesFromDeclaration(upgradeOffer.candidate.nodes, g.nodes),
       edges: canvasEdgesFromDeclaration(upgradeOffer.candidate.edges),
       frames: canvasFramesFromDeclaration(upgradeOffer.candidate.frames, g.frames ?? []),
@@ -616,7 +622,7 @@ export function WorkflowEditorPage() {
       ? { mode: 'cluster', cluster_address: clusterAddress.trim(), cluster_gpus: gpuSel.count ?? 1 }
       : { mode: 'local', cards: gpuSel.cards };
     return {
-      version: 5,
+      version: graph.version ?? 5,
       /* 声明身份跟实验走（flow id）：同一预设开两个实验各自有会话与声明身份 */
       workflow_id: flowId ?? preset.key,
       resource,
@@ -797,10 +803,11 @@ export function WorkflowEditorPage() {
   /** 提交与执行分开：提交中只锁入口，节点转动必须等真实 node.running。 */
   const beginRun = (target?: string) => {
     if (submittingRef.current || activeRun.current) return;
-    /* 旧图未确认升级副本前禁止执行：提交的声明版本会被会话响亮拒绝，
-     * 在这里提前拦住并把升级对话框立起来，不让用户拿报错猜原因。 */
-    if (upgradeOffer) {
-      setUpgradeOpen(true);
+    /* 旧图未确认升级副本前禁止执行：画布真实版本 < 5 的提交声明会被会话响亮
+     * 拒绝，在这里提前拦住并把升级对话框立起来，不让用户拿报错猜原因；
+     * 升级服务失败（无 offer）时同样拦住，但只警告不开空对话框。 */
+    if (upgradeOffer || (graph.version ?? 5) < 5) {
+      if (upgradeOffer) setUpgradeOpen(true);
       toast.warning(t('wf.upgradePendingRun'));
       return;
     }

@@ -26,6 +26,8 @@ interface RegistryPort {
   profiles?: string[];
   many?: boolean;
   optional?: boolean;
+  /** 消费者口额外接受的异构通道（后端 PortSpec.accepts 的导出） */
+  accepted_kinds?: string[];
 }
 
 interface RegistryParam {
@@ -261,7 +263,8 @@ const DEFAULT_EXTRAS: UiExtras = { category: 'wf.catInput', color: COLORS.code, 
 function fromRegistry(c: RegistryComponent): NodeTypeDef {
   const extras = UI_EXTRAS[c.type] ?? DEFAULT_EXTRAS;
   const toPort = (p: RegistryPort): PortDef =>
-    ({ key: p.key, label: p.key, type: p.kind as PortDef['type'], role: p.role, many: p.many });
+    ({ key: p.key, label: p.key, type: p.kind as PortDef['type'], role: p.role, many: p.many,
+       acceptedKinds: p.accepted_kinds });
   return {
     key: c.type,
     label: c.label,
@@ -284,3 +287,19 @@ function fromRegistry(c: RegistryComponent): NodeTypeDef {
 export const REGISTRY_NODE_TYPES: Record<string, NodeTypeDef> = Object.fromEntries(
   Object.values(registryData.components as Record<string, RegistryComponent>).map((c) => [c.type, fromRegistry(c)]),
 );
+
+/**
+ * 已删除节点类型（v4 存量图里的 policy_endpoint / reduce / reward_shape 等）的画布占位：
+ * 灰卡、零口零参、不可连线不可运行。nodeTypes 的 NODE_TYPES 缺键一律兑到它，旧图加载、
+ * 升级副本预览、YAML/代码导出从此渲染占位而不是整页卸载；真类型永远只来自注册表。
+ */
+export const UNKNOWN_NODE_DEF: NodeTypeDef = {
+  key: 'unknown',
+  label: 'unknown',
+  category: 'wf.catInput',
+  color: COLORS.after,
+  icon: <Wrench />,
+  inputs: [],
+  outputs: [],
+  params: [],
+};

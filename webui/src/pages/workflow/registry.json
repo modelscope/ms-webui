@@ -6995,7 +6995,7 @@
           "options": [],
           "group": "",
           "type": "str",
-          "required": false,
+          "required": true,
           "nullable": false,
           "minimum": null,
           "maximum": null,

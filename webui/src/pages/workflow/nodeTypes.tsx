@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { REGISTRY_NODE_TYPES } from './registryNodes';
+import { REGISTRY_NODE_TYPES, UNKNOWN_NODE_DEF } from './registryNodes';
 import registryData from './registry.json';
 import type { MessageKey } from '@/i18n';
 
@@ -114,6 +114,12 @@ export interface PortDef {
    * role 说明这根线在算法里扮演什么。连线引导时显示在兼容口旁。
    */
   role?: string;
+  /**
+   * 消费者口额外接受的异构通道（后端 PortSpec.accepts 的导出，如 train_step.batch
+   * 声明 ['DATA','BATCH']）：源口类型等于本口类型、或命中该表，连线即合法——
+   * 与后端图校验同一套规则，否则 preset 里的合法边用户手工重连时会被拒。
+   */
+  acceptedKinds?: string[];
 }
 
 export interface NodeParam {
@@ -179,7 +185,16 @@ export interface NodeTypeDef {
  * 语义（口、参数、类别）来自 registry.json；图标/配色/提示等纯展示在 registryNodes 的
  * UI_EXTRAS 表。加一种组件 = registry.py 加 descriptor + 重跑 export + UI_EXTRAS 加一行。
  */
-export const NODE_TYPES: Record<string, NodeTypeDef> = REGISTRY_NODE_TYPES;
+/*
+ * 缺键兑底（Proxy）：v4 存量图携带的已删除节点类型（policy_endpoint / reduce /
+ * reward_shape 等）读注册表拿不到 def，任何 NODE_TYPES[type] 直接解引用都会当场崩。
+ * 缺键一律兑 UNKNOWN_NODE_DEF 灰卡占位（零口零参、不可连线不可运行），旧图加载、
+ * 升级副本预览、YAML/代码导出渲染占位而不是整页卸载。面板/类型列表不受影响
+ * （Object.values/in 均不经 get 陷阱，仍只枚举注册表内类型）。
+ */
+export const NODE_TYPES: Record<string, NodeTypeDef> = new Proxy(REGISTRY_NODE_TYPES, {
+  get: (types, type: string) => types[type] ?? UNKNOWN_NODE_DEF,
+});
 
 
 

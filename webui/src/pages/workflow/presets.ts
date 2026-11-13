@@ -18,6 +18,9 @@ export interface Preset {
   nodes: GraphNode[];
   edges: GraphEdge[];
   frames?: GraphFrame[];
+  /** 画布真实的声明版本（preset 自身即 v5，留空按 5 记；载入旧图时被覆盖），
+   * 保存/提交写回它而非盖章成 v5——升级退路靠它保住 */
+  version?: number;
 }
 
 const E = (from: string, fromPort: string, to: string, toPort: string, slot?: string): GraphEdge => ({
