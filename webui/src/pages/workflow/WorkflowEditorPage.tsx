@@ -17,6 +17,9 @@ import { DEFAULT_PRESET, PRESETS, clonePreset } from './presets';
 import { getWorkflowLog, getWorkflowSession, getWorkflowSessionByKey, pauseWorkflowRun, releaseWorkflowSession, resumeWorkflowRun, startWorkflowRun, stopWorkflowRun } from '../../api/workflow';
 import type { WorkflowEvent, WorkflowResourceDecl, WorkflowRunSubmission, WorkflowSessionSnapshot } from '../../api/workflow';
 import { createFlow, getFlow, saveFlow } from '../../api/flows';
+import type { FlowGraph } from '../../api/flows';
+import { upgradeWorkflowGraph } from '../../api/workflow';
+import type { WorkflowNodeDecl, WorkflowUpgradePreview } from '../../api/workflow';
 import { listModels, type ModelConfig } from '../../api/models';
 
 import { CodeBlock } from '@/components/CodeBlock';
@@ -67,6 +70,66 @@ function upstream(edges: GraphEdge[], nameOf: Map<string, string>, id: string): 
     .filter((e) => e.to === id)
     .map((e) => nameOf.get(e.from))
     .filter((n): n is string => !!n);
+}
+
+/*
+ * GraphUpgrade 副本（声明形态）→ 画布作者格式。params dict → NodeParam[]
+ * （面板值恒为文本，对象/数组走 JSON——与 serializeGraph 的提交边界互逆）；
+ * 边字段名对齐 python 声明；坐标是纯展示：旧 id 保留原位，升级插入的
+ * 新节点排在主链下方，用户自己拖到想要的位置。
+ */
+function canvasNodesFromDeclaration(
+  declNodes: WorkflowNodeDecl[],
+  original: GraphNode[],
+): GraphNode[] {
+  const positionOf = (id: string, index: number): { x: number; y: number } => {
+    const prior = original.find((n) => n.id === id);
+    if (prior) return { x: prior.x, y: prior.y };
+    return { x: 262, y: 900 + 130 * index };
+  };
+  return declNodes.map((n, index) => {
+    const { x, y } = positionOf(n.id, index);
+    return {
+      id: n.id, type: n.type, x, y, status: 'idle' as const,
+      params: Object.entries(n.params ?? {}).map(([label, value]) => ({
+        label,
+        value: value === null || value === undefined
+          ? ''
+          : typeof value === 'object' ? JSON.stringify(value) : String(value),
+        ptype: NODE_TYPES[n.type]?.params.find((p) => p.label === label)?.ptype,
+      })),
+      ...(n.code ? { code: n.code } : {}),
+    };
+  });
+}
+
+function canvasEdgesFromDeclaration(declEdges: NonNullable<WorkflowUpgradePreview['candidate']>['edges']): GraphEdge[] {
+  return declEdges.map((e) => ({
+    id: e.id ?? `${e.source}:${e.source_port}-${e.target}:${e.target_port}`,
+    from: e.source,
+    fromPort: e.source_port,
+    to: e.target,
+    toPort: e.target_port,
+    ...(e.slot ? { slot: e.slot } : {}),
+  }));
+}
+
+function canvasFramesFromDeclaration(
+  declFrames: NonNullable<WorkflowUpgradePreview['candidate']>['frames'],
+  original: GraphFrame[],
+): GraphFrame[] {
+  return (declFrames ?? []).map((f) => {
+    const prior = original.find((g) => g.id === f.id);
+    return {
+      id: f.id,
+      label: (f.name || 'wf.frameTrainLoop') as GraphFrame['label'],
+      x: prior?.x ?? 222,
+      y: prior?.y ?? -40,
+      w: prior?.w ?? 1560,
+      h: prior?.h ?? 760,
+      memberIds: [...(f.members ?? [])],
+    };
+  });
 }
 
 /** 图 → YAML。图形是唯一事实来源，YAML 与代码都由它生成 */
@@ -190,6 +253,13 @@ export function WorkflowEditorPage() {
    * 只有切换示例才丢弃。
    */
   const [runId, setRunId] = useState<string | null>(null);
+  /**
+   * 待确认的旧图升级提议（v5 前的 flows 读入后升副本）：确认前画布保持原
+   * 图占位、运行入口关闭；待确认项未清零时确认也只能拿到可读的未知节点，
+   * 不能静默把用户代码替换掉。
+   */
+  const [upgradeOffer, setUpgradeOffer] = useState<WorkflowUpgradePreview | null>(null);
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
   /** 运行日志：与状态同一拍拉回；失败时这里是唯一能看到「为什么」的地方 */
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logOpen, setLogOpen] = useState(false);
@@ -226,6 +296,23 @@ export function WorkflowEditorPage() {
         const flow = await getFlow(flowId);
         if (cancelled) return;
         setFlowName(flow.name);
+        /* v5 前的历史图（缺 version 字段按 v4 记）：先走后端升级服务出副本，
+         * 不拿 label/value 编辑态直接当执行声明——声明转换在后端 normalizeGraph。 */
+        const rawVersion = Number.isInteger(flow.graph.version) ? flow.graph.version : 4;
+        if (rawVersion < 5) {
+          try {
+            const preview = await upgradeWorkflowGraph({ ...flow.graph, version: rawVersion });
+            if (cancelled) return;
+            if ('error' in preview) {
+              toast.error(t('wf.upgradeFailed', { detail: preview.error }));
+            } else {
+              setUpgradeOffer(preview);
+              setUpgradeOpen(true);
+            }
+          } catch (error) {
+            if (!cancelled) toast.error(String(error));
+          }
+        }
         /* graph state 的形态是 Preset（画布三件套 + 脚手架元信息）：只换三件套 */
         setGraph((g) => ({
           ...g,
@@ -275,8 +362,8 @@ export function WorkflowEditorPage() {
   );
   const code = useMemo(() => graphToCode(nodes, edges, displayName), [nodes, edges, displayName]);
 
-  /** 画布三件套的持久化形态（frames 为空时不带键，与 FlowGraph 契约一致） */
-  const graphOut = () => ({ nodes, edges, ...(frames.length ? { frames } : {}) });
+  /** 画布三件套的持久化形态（frames 为空时不带键；version 带上，重读时免升级） */
+  const graphOut = (): FlowGraph => ({ version: 5, nodes, edges, ...(frames.length ? { frames } : {}) });
 
   /*
    * 保存实验：画布形态连同名称写回 flows 持久层。带 :id 的路由直接覆盖；
@@ -298,6 +385,26 @@ export function WorkflowEditorPage() {
         toast.success(t('wf.savedToast'));
       })
       .catch((error) => toast.error(String(error)));
+  };
+
+  /*
+   * 应用升级副本：确认后才替换编辑态。坐标/帧几何是纯展示，旧节点保原位；
+   * 待确认项未清零时副本里仍有未知类型节点，画布按兑底卡片渲染，运行
+   * 由会话侧的声明校验把住——用户手动处置后重新保存。替换不自动落盘：
+   * 保存仍由用户显式触发。
+   */
+  const acceptUpgrade = () => {
+    if (!upgradeOffer) return;
+    setGraph((g) => ({
+      ...g,
+      nodes: canvasNodesFromDeclaration(upgradeOffer.candidate.nodes, g.nodes),
+      edges: canvasEdgesFromDeclaration(upgradeOffer.candidate.edges),
+      frames: canvasFramesFromDeclaration(upgradeOffer.candidate.frames, g.frames ?? []),
+    }));
+    setUpgradeOffer(null);
+    setUpgradeOpen(false);
+    setFitSignal((s) => s + 1);
+    toast.success(t('wf.upgradeApplied'));
   };
 
   /** 切示例：整图换掉并重新 fit 视角（在跑的运行不跟过去——产物留在它自己的 run 目录） */
@@ -509,7 +616,7 @@ export function WorkflowEditorPage() {
       ? { mode: 'cluster', cluster_address: clusterAddress.trim(), cluster_gpus: gpuSel.count ?? 1 }
       : { mode: 'local', cards: gpuSel.cards };
     return {
-      version: 4,
+      version: 5,
       /* 声明身份跟实验走（flow id）：同一预设开两个实验各自有会话与声明身份 */
       workflow_id: flowId ?? preset.key,
       resource,
@@ -690,6 +797,13 @@ export function WorkflowEditorPage() {
   /** 提交与执行分开：提交中只锁入口，节点转动必须等真实 node.running。 */
   const beginRun = (target?: string) => {
     if (submittingRef.current || activeRun.current) return;
+    /* 旧图未确认升级副本前禁止执行：提交的声明版本会被会话响亮拒绝，
+     * 在这里提前拦住并把升级对话框立起来，不让用户拿报错猜原因。 */
+    if (upgradeOffer) {
+      setUpgradeOpen(true);
+      toast.warning(t('wf.upgradePendingRun'));
+      return;
+    }
     stopPoll();
     const generation = pollGeneration.current;
     submittingRef.current = true;
@@ -1149,6 +1263,47 @@ export function WorkflowEditorPage() {
               }}
             >
               {t('wf.forkBtn')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/*
+       * 旧图升级确认：存在 choices 时先展示升级问题和原图占位，禁止执行；
+       * 用户确认副本后才替换编辑态（reject 一律不改画布，只关弹窗）。
+       */}
+      <AlertDialog open={upgradeOpen} onOpenChange={setUpgradeOpen}>
+        <AlertDialogContent className="max-h-[80vh] overflow-y-auto">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('wf.upgradeTitle')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t('wf.upgradeDesc', {
+                changes: upgradeOffer?.changes.length ?? 0,
+                choices: upgradeOffer?.choices.length ?? 0,
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {upgradeOffer?.validation_error ? (
+            <p className="text-destructive text-[13px]">
+              {t('wf.upgradeValidationError')}: {upgradeOffer.validation_error}
+            </p>
+          ) : null}
+          {(upgradeOffer?.choices.length ?? 0) > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-[13px] font-medium">{t('wf.upgradeChoicesTitle')}</div>
+              <ul className="list-disc space-y-1 ps-5 text-[12.5px]">
+                {upgradeOffer?.choices.map((c) => (
+                  <li key={`${c.location}:${c.reason}`}>
+                    <span className="font-mono">{c.location}</span>: {c.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('wf.upgradeLater')}</AlertDialogCancel>
+            <AlertDialogAction onClick={acceptUpgrade}>
+              {t('wf.upgradeConfirm')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

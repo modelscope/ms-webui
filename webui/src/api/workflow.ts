@@ -208,3 +208,44 @@ export async function previewWorkflowOutput(
   if (!res.ok) throw new Error(tStatic('api.readRunFailed', { status: res.status }));
   return res.json();
 }
+
+/** GraphUpgrade 的一次升级决策项：choices 未清零时不能确认运行 */
+export interface WorkflowUpgradeChoice {
+  location: string;
+  reason: string;
+  options: string[];
+}
+
+/** GraphUpgrade.preview 的后端结果镜像（graph.py GraphUpgrade._result） */
+export interface WorkflowUpgradePreview {
+  original: Record<string, unknown>;
+  candidate: {
+    version: number;
+    workflow_id: string;
+    nodes: WorkflowNodeDecl[];
+    edges: WorkflowEdgeDecl[];
+    frames?: WorkflowFrameDecl[];
+    resource?: WorkflowResourceDecl;
+  };
+  changes: Record<string, unknown>[];
+  choices: WorkflowUpgradeChoice[];
+  validation_error: string;
+  can_confirm: boolean;
+}
+
+/** 旧图升级：后端 GraphUpgrade 只在副本上展开，确认与否由页面决定 */
+export async function upgradeWorkflowGraph(
+  graph: Record<string, unknown>,
+  selections?: Record<string, string>,
+): Promise<WorkflowUpgradePreview | { error: string }> {
+  const res = await fetch(apiBase() + '/api/workflow/upgrade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ graph, ...(selections ? { selections } : {}) }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
+    throw new Error(body.detail || body.error || tStatic('api.upgradeFailed', { status: res.status }));
+  }
+  return res.json();
+}

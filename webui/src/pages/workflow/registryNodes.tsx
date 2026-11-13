@@ -51,6 +51,8 @@ interface RegistryComponent {
   params: RegistryParam[];
   factory?: string;
   effects?: string[];
+  /** 展示归属面（算法/资源/运行/产物）：registry v5 起随 descriptor 导出 */
+  surface?: string;
 }
 
 /** registry 的中文参数分区 → 展示 key；未映射的分区原样展示（en 回落中文） */
@@ -157,11 +159,8 @@ const UI_EXTRAS: Record<string, UiExtras> = {
   model_forward: {
     category: 'wf.catRewardAdv', color: COLORS.adv, icon: <TrendingUp />, runnable: true,
   },
-  reduce: {
-    category: 'wf.catRewardAdv', color: COLORS.adv, icon: <Sigma />,
-  },
-  reward_shape: {
-    category: 'wf.catRewardAdv', color: COLORS.reward, icon: <Scale />,
+  privileged_view: {
+    category: 'wf.catRewardAdv', color: COLORS.adv, icon: <Layers />, runnable: true,
   },
   advantage: {
     category: 'wf.catRewardAdv', labelKey: 'wf.nodeAdvantage', color: COLORS.adv, icon: <TrendingUp />, runnable: true,

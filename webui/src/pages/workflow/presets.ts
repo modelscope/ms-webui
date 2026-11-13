@@ -2,15 +2,14 @@ import type { GraphEdge, GraphFrame, GraphNode } from './nodeTypes';
 import type { MessageKey } from '@/i18n';
 
 /**
- * 示例图（v4 连线简化版）。图上的线只表达两件事：数据从哪一步来、谁在谁之后；
- * 构造身份（tokenizer、优化器）一律是参数，训练目标与评分函数是独立节点
- * （loss / scorer，各接一根线进 train_step / score）。模型节点保留为构造节点，
- * 每个模型只向首个消费点拉一根 MODEL 线；checkpoint / weight_sync /
- * weight_average 不再有资源边——训练对象身份沿连线共享（作用域解析），多模型
- * 歧义时从 train_step 的 model 输出口显式接线（前序输出，不从 actor 横拉）。
- * 算法身份只出现在参数（estimator 名）与 loss / scorer 节点的 kind 里。many 口
- * 的边带 slot，slot 就是消费端参数的真实名字（advantages / ref_logps）或评分列名。
- * 数据集一律经 dataloader 进消费面（驱动器或生成步），不直连。
+ * 示例图（v5 契约版）：轨迹是唯一样本载荷——driver/generate 的数据口是
+ * traj；评分列写回轨迹（score 出 traj，下游不再有独立 reward 线）；训练目标
+ * （advantages/returns/old_* /ref_logps/teacher_*）由 advantage 写回轨迹，
+ * advantage.traj 直接接管 train_step 的 batch。前向汇成单一 MODEL_OUTPUT 出口
+ * （out），参考/教师信号接 estimate的 ref_out/teacher_out 或 train_step 的
+ * reference/teacher 口。构造身份（tokenizer、优化器）一律是参数，训练目标与
+ * 评分函数是独立节点（loss / scorer）。many 口的边带 slot，slot 是消费端参数
+ * 的真实名字或评分列名。数据集一律经 dataloader 进消费面，不直连。
  */
 export interface Preset {
   key: string;
@@ -65,6 +64,7 @@ const ENGINE_ARGS_AGENTIC = '{"max_model_len": 4096, "gpu_memory_utilization": 0
  * GRPO（LoRA 流式）：主链 dataset→loader→driver→score→advantage→train→ckpt→merge→infer。
  * 组基线是 advantage 的 estimator 参数；损失与评分是独立节点（kind 参数）；
  * 采样器按模型 id 参数自建引擎。循环环：train.then→sync.after、sync.then→driver.after。
+ * 参考前向（全参版的 KL 锚）接 advantage 的 ref_out，估计器把 ref_logps 写回轨迹。
  */
 const GRPO: Preset = {
   key: 'grpo',
@@ -93,12 +93,10 @@ const GRPO: Preset = {
     E('g_loader', 'source', 'g_driver', 'prompts'),
     E('g_sampler', 'sampler', 'g_driver', 'engine', 'engine'),
     E('g_scor', 'scorer', 'g_score', 'scorers', 'math'),
-    E('g_driver', 'samples', 'g_score', 'samples'),
-    E('g_score', 'reward', 'g_adv', 'reward'),
-    E('g_driver', 'samples', 'g_adv', 'traj'),
-    E('g_adv', 'adv', 'g_train', 'arguments', 'advantages'),
-    E('g_adv', 'old_logps', 'g_train', 'arguments', 'old_logps'),
-    E('g_driver', 'samples', 'g_train', 'batch'),
+    E('g_driver', 'traj', 'g_score', 'traj'),
+    E('g_score', 'traj', 'g_adv', 'traj'),
+    /* 训练目标随轨迹交付：advantage 写完 advantages/old_logps 的轨迹接管训练批 */
+    E('g_adv', 'traj', 'g_train', 'batch'),
     E('g_loss', 'loss', 'g_train', 'loss'),
     E('g_policy', 'model', 'g_train', 'model'),
     E('g_train', 'step', 'g_ckpt', 'step'),
@@ -118,7 +116,8 @@ const GRPO: Preset = {
 
 /**
  * 全参 GRPO：同一张图——训练类型是参数档位不是拓扑分叉；参考模型是独立冻结
- * 副本，其前向 logps 经 arguments 的 ref_logps 槽进损失（KL 锚）。
+ * 副本，其前向 logps 接 advantage 的 ref_out（估计器把 ref_logps 写回轨迹，
+ * KL 锦在训练目标里）。
  */
 const GRPO_FULL: Preset = {
   ...GRPO,
@@ -135,8 +134,8 @@ const GRPO_FULL: Preset = {
   ]),
   edges: GRPO.edges.concat([
     E('g_ref', 'model', 'g_refsig', 'model'),
-    E('g_driver', 'samples', 'g_refsig', 'traj'),
-    E('g_refsig', 'logps', 'g_train', 'arguments', 'ref_logps'),
+    E('g_score', 'traj', 'g_refsig', 'traj'),
+    E('g_refsig', 'out', 'g_adv', 'ref_out'),
     /* 双模型（policy+ref）作用下 checkpoint / weight_sync 显式消歧：接前序输出 */
     E('g_train', 'model', 'g_ckpt', 'model'),
     E('g_train', 'model', 'g_sync', 'model'),
@@ -174,12 +173,9 @@ const GRPO_COLOCATE: Preset = {
     E('c_loader', 'batch', 'c_gen', 'prompts'),
     E('c_sampler', 'sampler', 'c_gen', 'engine'),
     E('c_scor', 'scorer', 'c_score', 'scorers', 'math'),
-    E('c_gen', 'samples', 'c_score', 'samples'),
-    E('c_score', 'reward', 'c_adv', 'reward'),
-    E('c_gen', 'samples', 'c_adv', 'traj'),
-    E('c_adv', 'adv', 'c_train', 'arguments', 'advantages'),
-    E('c_adv', 'old_logps', 'c_train', 'arguments', 'old_logps'),
-    E('c_gen', 'samples', 'c_train', 'batch'),
+    E('c_gen', 'traj', 'c_score', 'traj'),
+    E('c_score', 'traj', 'c_adv', 'traj'),
+    E('c_adv', 'traj', 'c_train', 'batch'),
     E('c_loss', 'loss', 'c_train', 'loss'),
     E('c_policy', 'model', 'c_train', 'model'),
     E('c_train', 'step', 'c_ckpt', 'step'),
@@ -193,11 +189,12 @@ const GRPO_COLOCATE: Preset = {
 };
 
 /**
- * PPO（双模型）：在 GRPO 骨架上加 critic 线——独立 value 模型前向读 values，
- * GAE 估计器（delta_t = r_t + gamma·V_{t+1} − V_t 的递推），weight_average 把
- * 训练权重 EMA 进冻结参考。两个模型各占自己的 train_step；双模型作用下
- * checkpoint / weight_sync / weight_average 的模型身份从 train 的 model 输出口
- * 显式接线（前序输出），不再从 actor 横拉。
+ * PPO（双模型）：在 GRPO 骨架上加 critic 线——独立 value 模型前向读 values
+ * （接 advantage 的 value_out，GAE 估计器 delta_t = r_t + gamma·V_{t+1} − V_t
+ * 递推），weight_average 把训练权重 EMA 进冻结参考。两个模型各占自己的
+ * train_step；critic 的训练目标（returns/old_values）同样由 advantage 写回轨迹。
+ * 双模型作用下 checkpoint / weight_sync / weight_average 的模型身份从 train
+ * 的 model 输出口显式接线（前序输出），不再从 actor 横拉。
  */
 const PPO: Preset = {
   key: 'ppo',
@@ -209,7 +206,7 @@ const PPO: Preset = {
     N('p_driver', 'streaming_driver', X[1], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('rl_config', COMPLETION), P('async_mode', 'none'), P('max_staleness', '0'), P('num_generations', '4')]),
     N('p_score', 'score', X[2], 0),
     N('p_vsig', 'model_forward', X[3], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('outputs', '["values"]')]),
-    N('p_adv', 'advantage', X[3], 0, [P('estimator', 'gae'), P('profile', 'token'), P('gamma', '1.0'), P('lam', '0.95')]),
+    N('p_adv', 'advantage', X[3], 0, [P('estimator', 'gae'), P('kwargs', '{"gamma": 1.0, "gae_lambda": 0.95}')]),
     N('p_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-5'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
     N('p_vtrain', 'train_step', X[5], -260, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-5'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
     N('p_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
@@ -232,24 +229,20 @@ const PPO: Preset = {
     E('p_loader', 'source', 'p_driver', 'prompts'),
     E('p_sampler', 'sampler', 'p_driver', 'engine', 'engine'),
     E('p_scor', 'scorer', 'p_score', 'scorers', 'math'),
-    E('p_driver', 'samples', 'p_score', 'samples'),
-    E('p_score', 'reward', 'p_adv', 'reward'),
-    E('p_driver', 'samples', 'p_adv', 'traj'),
-    E('p_driver', 'samples', 'p_vsig', 'traj'),
+    E('p_driver', 'traj', 'p_score', 'traj'),
+    E('p_score', 'traj', 'p_adv', 'traj'),
+    E('p_driver', 'traj', 'p_vsig', 'traj'),
     E('p_value', 'model', 'p_vsig', 'model'),
-    E('p_vsig', 'values', 'p_adv', 'values'),
-    E('p_adv', 'adv', 'p_train', 'arguments', 'advantages'),
-    E('p_adv', 'old_logps', 'p_train', 'arguments', 'old_logps'),
-    E('p_driver', 'samples', 'p_train', 'batch'),
+    E('p_vsig', 'out', 'p_adv', 'value_out'),
+    E('p_adv', 'traj', 'p_train', 'batch'),
     E('p_loss', 'loss', 'p_train', 'loss'),
     E('p_policy', 'model', 'p_train', 'model'),
     E('p_train', 'step', 'p_ckpt', 'step'),
     E('p_train', 'model', 'p_ckpt', 'model'),
     E('p_ckpt', 'artifact', 'p_merge', 'artifact'),
-    /* critic 线：value 前向 → GAE values；value 自己的 train_step */
-    E('p_vsig', 'values', 'p_vtrain', 'arguments', 'old_values'),
-    E('p_adv', 'returns', 'p_vtrain', 'arguments', 'returns'),
-    E('p_driver', 'samples', 'p_vtrain', 'batch'),
+    /* critic 线：value 前向 → advantage 的 value_out；critic 自己的 train_step
+     * 消费轨迹上写回的 returns/old_values（train_ready） */
+    E('p_adv', 'traj', 'p_vtrain', 'batch'),
     E('p_vloss', 'loss', 'p_vtrain', 'loss'),
     E('p_value', 'model', 'p_vtrain', 'model'),
     /* EMA 参考：训练权重混入冻结副本 */
@@ -296,9 +289,9 @@ const RFT: Preset = {
     E('r_loader', 'batch', 'r_gen', 'prompts'),
     E('r_sampler', 'sampler', 'r_gen', 'engine'),
     E('r_scor', 'scorer', 'r_score', 'scorers', 'math'),
-    E('r_gen', 'samples', 'r_score', 'samples'),
-    E('r_score', 'reward', 'r_sel', 'reward'),
-    E('r_gen', 'samples', 'r_sel', 'batch'),
+    E('r_gen', 'traj', 'r_score', 'traj'),
+    /* 判据是轨迹上的具名评分列：select 从 score 的 traj 读，不再有独立 reward 线 */
+    E('r_score', 'traj', 'r_sel', 'batch'),
     E('r_sel', 'batch', 'r_train', 'batch'),
     E('r_loss', 'loss', 'r_train', 'loss'),
     E('r_policy', 'model', 'r_train', 'model'),
@@ -313,10 +306,10 @@ const RFT: Preset = {
 };
 
 /**
- * OPD-MT（多教师蒸馏）：两路 teacher 前向各出一路 logps，signal_combine 以
- * 概率混合（logsumexp_k(log w_k + logp_k)）把 K 路融成单一教师目标——多教师
- * 融合是一个显式的通用数学组件，不是损失的隐藏分支；混合结果经 train_step
- * 的 arguments 以真实参数名（teacher_logps）进入损失。
+ * OPD-MT（多教师蒸馏）：两路 teacher 前向各出一路 logps（单一 out 口），
+ * signal_combine 以概率混合（logsumexp_k(log w_k + logp_k)）把 K 路融成单一
+ * 教师目标——多教师融合是一个显式的通用数学组件，不是损失的隐藏分支；
+ * 混合结果接 train_step 的 teacher 口（教师信号不再是 loss 形参连线）。
  */
 const OPD_MT: Preset = {
   key: 'opd_mt',
@@ -342,14 +335,14 @@ const OPD_MT: Preset = {
     E('o_data', 'data', 'o_loader', 'data'),
     E('o_loader', 'batch', 'o_gen', 'prompts'),
     E('o_sampler', 'sampler', 'o_gen', 'engine'),
-    E('o_gen', 'samples', 'o_tsig1', 'traj'),
+    E('o_gen', 'traj', 'o_tsig1', 'traj'),
     E('o_teach1', 'model', 'o_tsig1', 'model'),
-    E('o_tsig1', 'logps', 'o_mix', 'signals', 'teacher_1'),
-    E('o_gen', 'samples', 'o_tsig2', 'traj'),
+    E('o_tsig1', 'out', 'o_mix', 'signals', 'teacher_1'),
+    E('o_gen', 'traj', 'o_tsig2', 'traj'),
     E('o_teach2', 'model', 'o_tsig2', 'model'),
-    E('o_tsig2', 'logps', 'o_mix', 'signals', 'teacher_2'),
-    E('o_mix', 'out', 'o_train', 'arguments', 'teacher_logps'),
-    E('o_gen', 'samples', 'o_train', 'batch'),
+    E('o_tsig2', 'out', 'o_mix', 'signals', 'teacher_2'),
+    E('o_mix', 'out', 'o_train', 'teacher'),
+    E('o_gen', 'traj', 'o_train', 'batch'),
     E('o_loss', 'loss', 'o_train', 'loss'),
     E('o_policy', 'model', 'o_train', 'model'),
     E('o_train', 'step', 'o_ckpt', 'step'),
@@ -373,7 +366,7 @@ const OPSD: Preset = {
     .filter((e) => e.from !== 'o_teach2' && e.from !== 'o_tsig2' && e.from !== 'o_mix'
       && e.to !== 'o_tsig2' && e.to !== 'o_mix')
     .map((e) => (e.from === 'o_tsig1' && e.to === 'o_mix'
-      ? { ...e, to: 'o_train', toPort: 'arguments', slot: 'teacher_logps' } : e)),
+      ? { ...e, to: 'o_train', toPort: 'teacher', slot: undefined } : e)),
   frames: [{
     ...OPD_MT.frames![0],
     memberIds: (OPD_MT.frames![0].memberIds ?? []).filter((id) => id !== 'o_tsig2' && id !== 'o_mix'),
@@ -427,7 +420,7 @@ const SFT_FULL: Preset = {
 
 /**
  * DPO（偏好对）：数据经 loader 直入训练步（paired 编码在内部完成）；参考分支
- * 从独立冻结副本前向读 ref logps，经 arguments 的 ref_logps 槽进损失。
+ * 从独立冻结副本前向读 ref logps，接 train_step 的 reference 口。
  */
 const DPO: Preset = {
   key: 'dpo',
@@ -448,7 +441,7 @@ const DPO: Preset = {
     E('d_data', 'data', 'd_loader', 'data'),
     E('d_loader', 'batch', 'd_rsig', 'traj'),
     E('d_ref', 'model', 'd_rsig', 'model'),
-    E('d_rsig', 'logps', 'd_train', 'arguments', 'ref_logps'),
+    E('d_rsig', 'out', 'd_train', 'reference'),
     E('d_loader', 'batch', 'd_train', 'batch'),
     E('d_loss', 'loss', 'd_train', 'loss'),
     E('d_policy', 'model', 'd_train', 'model'),
@@ -481,7 +474,7 @@ const TCPO: Preset = {
     N('t_chal', 'challenger', X[1], 0, [P('seed', '数学谜题'), P('max_tasks', '4'), P('tokenizer', TOKENIZER), P('template_config', TEMPLATE),
                                         P('challenger_config', '{"num_challenger_rollouts": 2, "num_solver_rollouts": 3, "pass_band": [1, 2], "max_empty_rounds": 12, "max_turns": 8}')]),
     N('t_score', 'score', X[2], 0),
-    N('t_adv', 'advantage', X[3], 0, [P('estimator', 'grpo'), P('kwargs', '{"num_generations": 3}')]),
+    N('t_adv', 'advantage', X[3], 0, [P('estimator', 'grpo'), P('num_generations', '3')]),
     N('t_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
     N('t_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
     N('t_sync', 'weight_sync', X[3], 520, undefined, { after: 'right', then: 'left' }),
@@ -498,12 +491,9 @@ const TCPO: Preset = {
     E('t_sampler', 'sampler', 't_chal', 'backend'),
     E('t_env', 'env', 't_chal', 'env'),
     E('t_scor', 'scorer', 't_score', 'scorers', 'math'),
-    E('t_chal', 'answers', 't_score', 'samples'),
-    E('t_score', 'reward', 't_adv', 'reward'),
-    E('t_chal', 'answers', 't_adv', 'traj'),
-    E('t_adv', 'adv', 't_train', 'arguments', 'advantages'),
-    E('t_adv', 'old_logps', 't_train', 'arguments', 'old_logps'),
-    E('t_chal', 'answers', 't_train', 'batch'),
+    E('t_chal', 'answers', 't_score', 'traj'),
+    E('t_score', 'traj', 't_adv', 'traj'),
+    E('t_adv', 'traj', 't_train', 'batch'),
     E('t_loss', 'loss', 't_train', 'loss'),
     E('t_policy', 'model', 't_train', 'model'),
     E('t_train', 'step', 't_ckpt', 'step'),
@@ -535,7 +525,7 @@ const PSC: Preset = {
     N('s_chal', 'challenger', X[1], 0, [P('seed', '谜题生成'), P('max_tasks', '4'), P('tokenizer', TOKENIZER), P('template_config', TEMPLATE),
                                          P('challenger_config', '{"num_challenger_rollouts": 2, "num_solver_rollouts": 3, "pass_band": [1, 2], "max_empty_rounds": 12, "max_turns": 8}')]),
     N('s_score', 'score', X[2], 0),
-    N('s_adv', 'advantage', X[3], 0, [P('estimator', 'rloo'), P('kwargs', '{"num_generations": 2}')]),
+    N('s_adv', 'advantage', X[3], 0, [P('estimator', 'rloo'), P('num_generations', '2')]),
     N('s_train', 'train_step', X[4], 0, [P('tokenizer', TOKENIZER), P('template_config', TEMPLATE), P('lr', '1e-4'), P('gradient_accumulation_steps', '1'), P('micro_batch_size', '4')]),
     N('s_ckpt', 'checkpoint', X[5], 0, [P('profile', 'model')]),
     N('s_sync', 'weight_sync', X[3], 780, undefined, { after: 'right', then: 'left' }),
@@ -556,11 +546,9 @@ const PSC: Preset = {
     E('s_sam2', 'sampler', 's_sroll', 'sampler'),
     E('s_sroll', 'rollout', 's_chal', 'solver_rollout'),
     E('s_scor', 'scorer', 's_score', 'scorers', 'math'),
-    E('s_chal', 'questions', 's_score', 'samples'),
-    E('s_score', 'reward', 's_adv', 'reward'),
-    E('s_chal', 'questions', 's_adv', 'traj'),
-    E('s_adv', 'adv', 's_train', 'arguments', 'advantages'),
-    E('s_chal', 'questions', 's_train', 'batch'),
+    E('s_chal', 'questions', 's_score', 'traj'),
+    E('s_score', 'traj', 's_adv', 'traj'),
+    E('s_adv', 'traj', 's_train', 'batch'),
     E('s_loss', 'loss', 's_train', 'loss'),
     E('s_prop', 'model', 's_train', 'model'),
     E('s_train', 'step', 's_ckpt', 'step'),
@@ -612,11 +600,9 @@ const RSI: Preset = {
     E('i_env', 'env', 'i_roll', 'env'),
     E('i_roll', 'rollout', 'i_gen', 'episode'),
     E('i_scor', 'scorer', 'i_score', 'scorers', 'math'),
-    E('i_gen', 'samples', 'i_score', 'samples'),
-    E('i_score', 'reward', 'i_adv', 'reward'),
-    E('i_gen', 'samples', 'i_adv', 'traj'),
-    E('i_adv', 'adv', 'i_train', 'arguments', 'advantages'),
-    E('i_gen', 'samples', 'i_train', 'batch'),
+    E('i_gen', 'traj', 'i_score', 'traj'),
+    E('i_score', 'traj', 'i_adv', 'traj'),
+    E('i_adv', 'traj', 'i_train', 'batch'),
     E('i_loss', 'loss', 'i_train', 'loss'),
     E('i_policy', 'model', 'i_train', 'model'),
     E('i_train', 'step', 'i_ckpt', 'step'),

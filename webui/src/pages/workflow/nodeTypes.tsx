@@ -17,14 +17,15 @@ import type { MessageKey } from '@/i18n';
  * 端口数据类型。连线两端类型必须一致，画布会挡掉不匹配的连接；
  * 端口圆点和连线颜色都取自类型，扫一眼就知道这根线在传什么。
  */
-/* 通道语义表（kind -> schema）。26 个 kind 的全集，PORT_TYPES 据此派生。 */
+/* 通道语义表（kind -> schema）。20 个 kind 的全集，PORT_TYPES 据此派生。 */
 const registryChannels: Record<string, unknown> = registryData.channels as Record<string, unknown>;
 
 /**
  * 通道的展示层（颜色 + 文案键）。语义真相源是 registry.json 的 channels
- * （26 个 kind）；本表只管长相，两者在下方的派生循环里合成 PORT_TYPES。
- * channels 里出现而本表没配的 kind 走兜底色，不再崩溃；本表里有而
- * channels 已除名的 kind（如旧图的 CKPT）保留条目，旧画布数据仍可渲染。
+ * （20 个 kind）；本表只管长相，两者在下方的派生循环里合成 PORT_TYPES。
+ * channels 里出现而本表没配的 kind 走兑底色，不再崩溃；本表里有而
+ * channels 已除名的 kind（如旧图的 REWARD/ADV/SIGNAL）保留条目，
+ * 旧画布数据在升级前仍可渲染。
  */
 const PORT_DISPLAY: Record<string, { label: MessageKey; color: string }> = {
   MODEL: { label: 'wf.portModel', color: '#3B82F6' },
@@ -32,10 +33,16 @@ const PORT_DISPLAY: Record<string, { label: MessageKey; color: string }> = {
   SAMPLER: { label: 'wf.portSampler', color: '#0EA5E9' },
   /**
    * 轨迹。一根 TRAJ 线传的是一批轨迹（batch × num_generations 条），
-   * 每条轨迹自带 input_ids / labels / logprobs / turns。
-   * logprobs 不单独拉线就是因为它本来就在轨迹里。
+   * 每条轨迹自带 input_ids / labels / logprobs / turns；评分列与训练目标
+   * （advantages/returns/old_*）都是轨迹的字段，不单独拉线。
    */
   TRAJ: { label: 'wf.portTraj', color: '#22D3EE' },
+  /**
+   * 前向结果（ModelOutput）。logps/values/logits/embeddings 是它的字段
+   * profile，不是独立连线类型；参考/教师/旧策略/critic 的前向角色由
+   * 消费口（ref_out/teacher_out/old_out/value_out）表达。
+   */
+  MODEL_OUTPUT: { label: 'wf.portModelOutput', color: '#34D399' },
   /** 环境池。一根 ENV 线代表一批 env slot，与轨迹按下标一一对应 */
   ENV: { label: 'wf.portEnv', color: '#84CC16' },
   TOOL: { label: 'wf.portTool', color: '#D946EF' },
@@ -48,7 +55,7 @@ const PORT_DISPLAY: Record<string, { label: MessageKey; color: string }> = {
    * 只有没有数据依赖可依附的先后关系才用 CTRL 线——如训练完发布、发布完回生成。
    */
   CTRL: { label: 'wf.portCtrl', color: '#64748B' },
-  /* --- registry v3 新通道 --- */
+  /* --- 资源通道（scope 类） --- */
   DATASET: { label: 'wf.portDataset', color: '#9333EA' },
   ROLLOUT: { label: 'wf.portRollout', color: '#06B6D4' },
   GROUP_RULE: { label: 'wf.portGroupRule', color: '#DB2777' },
@@ -59,8 +66,9 @@ const PORT_DISPLAY: Record<string, { label: MessageKey; color: string }> = {
   PUBLISH: { label: 'wf.portPublish', color: '#2563EB' },
   SYNC: { label: 'wf.portSync', color: '#0D9488' },
   ARTIFACT: { label: 'wf.portArtifact', color: '#F59E0B' },
-  /* 旧图数据里的已除名通道：保渲染，不参与新图生成（v3 连线简化后除名：
-     模板/损失/优化器/评分均降为参数，不再有对应连线） */
+  /* 旧图数据里的已除名通道：保渲染，不参与新图生成（v5 契约除名：
+     REWARD/ADV/SIGNAL 包装降为轨迹字段或 MODEL_OUTPUT；模板/损失/优化器
+     /评分均降为参数，不再有对应连线） */
   TEMPLATE: { label: 'wf.portTemplate', color: '#8B5CF6' },
   SCORER: { label: 'wf.portScorer', color: '#E11D48' },
   OPTIMIZER: { label: 'wf.portOptimizer', color: '#DC2626' },

@@ -92,7 +92,7 @@
     },
     "SCORER": {
       "kind": "SCORER",
-      "doc": "评分器对象：规则注册名构造或用户代码；score 按接线顺序聚合为多列。",
+      "doc": "评分器对象：规则注册名构造或用户代码；分数以具名列写回轨迹。",
       "reference": true,
       "profiles": [],
       "allows": [
@@ -109,11 +109,19 @@
           "doc": "原始或预测行；业务列原样保留。",
           "fields": [
             {
-              "name": "rows",
-              "doc": "原生行集合",
-              "dtype": "rows[B]",
-              "frame": "",
+              "name": "messages",
+              "doc": "保留完整多轮消息及工具结果",
+              "dtype": "messages[B]",
+              "frame": "row",
               "required": true,
+              "guarded": false
+            },
+            {
+              "name": "extra",
+              "doc": "原生扩展字段，不丢弃多模态和业务列",
+              "dtype": "dict",
+              "frame": "",
+              "required": false,
               "guarded": false
             },
             {
@@ -159,11 +167,19 @@
           "doc": "Iterator 分配身份的当前批次。",
           "fields": [
             {
-              "name": "rows",
-              "doc": "本批原生行集合",
-              "dtype": "rows[B]",
-              "frame": "",
+              "name": "messages",
+              "doc": "保留完整多轮消息及工具结果",
+              "dtype": "messages[B]",
+              "frame": "row",
               "required": true,
+              "guarded": false
+            },
+            {
+              "name": "extra",
+              "doc": "原生扩展字段，不丢弃多模态和业务列",
+              "dtype": "dict",
+              "frame": "",
+              "required": false,
               "guarded": false
             },
             {
@@ -603,12 +619,192 @@
     },
     "TRAJ": {
       "kind": "TRAJ",
-      "doc": "完整多轮轨迹与采样 token 身份。",
+      "doc": "唯一公共轨迹载荷；profile 是同一原生轨迹的字段能力阶段。",
       "reference": false,
       "profiles": [
         {
+          "profile": "raw",
+          "doc": "未编码的原始/预测行。",
+          "fields": [
+            {
+              "name": "messages",
+              "doc": "保留完整多轮消息及工具结果",
+              "dtype": "messages[B]",
+              "frame": "row",
+              "required": true,
+              "guarded": false
+            },
+            {
+              "name": "extra",
+              "doc": "原生扩展字段，不丢弃多模态和业务列",
+              "dtype": "dict",
+              "frame": "",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "batch_id",
+              "doc": "source 分配的稳定批次身份",
+              "dtype": "str",
+              "frame": "",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "row_ids",
+              "doc": "按实际行顺序排列的稳定身份",
+              "dtype": "str[B]",
+              "frame": "row",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "group_ids",
+              "doc": "显式完整分组身份",
+              "dtype": "str[B]",
+              "frame": "row",
+              "required": false,
+              "guarded": true
+            },
+            {
+              "name": "pair_ids",
+              "doc": "成对数据的原子身份",
+              "dtype": "str[B]",
+              "frame": "row",
+              "required": false,
+              "guarded": true
+            }
+          ],
+          "cardinality": "B 行；ragged token 长度 L_i/T_i",
+          "alignment": "batch_id + row_ids/order + group_ids/pair_ids（若有）",
+          "layout": "list[dict]",
+          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
+        },
+        {
+          "profile": "encoded",
+          "doc": "已按编码规则落成完整输入 feature 的行。",
+          "fields": [
+            {
+              "name": "input_ids",
+              "doc": "完整序列 token",
+              "dtype": "int64[L_i]",
+              "frame": "input",
+              "required": true,
+              "guarded": false
+            },
+            {
+              "name": "labels",
+              "doc": "原生编码规则的训练标签",
+              "dtype": "int64[L_i]",
+              "frame": "input",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "attention_mask",
+              "doc": "原生 attention mask",
+              "dtype": "bool[L_i]",
+              "frame": "input",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "completion_mask",
+              "doc": "响应位置 mask",
+              "dtype": "bool[L_i]",
+              "frame": "input",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "loss_scale",
+              "doc": "token 损失权重",
+              "dtype": "float32[L_i]",
+              "frame": "input",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "extensions",
+              "doc": "多模态/MoE 等原生 feature 扩展列",
+              "dtype": "dict",
+              "frame": "",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "batch_id",
+              "doc": "source 分配的稳定批次身份",
+              "dtype": "str",
+              "frame": "",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "row_ids",
+              "doc": "按实际行顺序排列的稳定身份",
+              "dtype": "str[B]",
+              "frame": "row",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "group_ids",
+              "doc": "显式完整分组身份",
+              "dtype": "str[B]",
+              "frame": "row",
+              "required": false,
+              "guarded": true
+            },
+            {
+              "name": "pair_ids",
+              "doc": "成对数据的原子身份",
+              "dtype": "str[B]",
+              "frame": "row",
+              "required": false,
+              "guarded": true
+            },
+            {
+              "name": "tokenizer_fingerprint",
+              "doc": "tokenizer 与编码规则指纹",
+              "dtype": "str",
+              "frame": "",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "response_token_ids",
+              "doc": "每行实际响应 token 身份",
+              "dtype": "int64[T_i]",
+              "frame": "response",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "response_loss_mask",
+              "doc": "与响应 token 一一对应的训练 mask",
+              "dtype": "bool[T_i]",
+              "frame": "response",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "token_frame",
+              "doc": "轮次、输入与响应 token 的位置映射",
+              "dtype": "dict[B]",
+              "frame": "",
+              "required": true,
+              "guarded": true
+            }
+          ],
+          "cardinality": "B 行；ragged token 长度 L_i/T_i",
+          "alignment": "batch_id + row_ids/order + group_ids/pair_ids（若有） + tokenizer_fingerprint + response_token_ids + response_loss_mask + token_frame",
+          "layout": "list[InputFeature]",
+          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
+        },
+        {
           "profile": "rollout",
-          "doc": "原生 RolloutSample/Trajectory 批次。",
+          "doc": "生成轨迹：响应 token 身份与采样 logps 已就位。",
           "fields": [
             {
               "name": "encoded",
@@ -619,7 +815,7 @@
               "guarded": true
             },
             {
-              "name": "rollout_logprobs",
+              "name": "rollout_logps",
               "doc": "实际采样 logps；引擎不提供时明确缺失",
               "dtype": "float32[T_i]",
               "frame": "response",
@@ -635,7 +831,7 @@
               "guarded": false
             },
             {
-              "name": "sampling_mask",
+              "name": "sampling_masks",
               "doc": "采样支持集合",
               "dtype": "SamplingMask[T_i]",
               "frame": "response",
@@ -725,46 +921,76 @@
           ],
           "cardinality": "B 行；ragged token 长度 L_i/T_i",
           "alignment": "batch_id + row_ids/order + group_ids/pair_ids（若有） + tokenizer_fingerprint + response_token_ids + response_loss_mask + token_frame",
-          "layout": "list[RolloutSample|Trajectory]",
+          "layout": "list[Trajectory]",
           "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
-        }
-      ],
-      "allows": [
-        "TRAJ"
-      ]
-    },
-    "REWARD": {
-      "kind": "REWARD",
-      "doc": "实际评分结果；缺失单独表示，不能补零。",
-      "reference": false,
-      "profiles": [
+        },
         {
-          "profile": "outcome",
-          "doc": "每个具名 scorer 对应一列。",
+          "profile": "scored",
+          "doc": "rollout + 具名评分列（rewards.orm/baseline/env）。",
           "fields": [
             {
-              "name": "values",
-              "doc": "评分矩阵",
-              "dtype": "float32[B,C]",
+              "name": "encoded",
+              "doc": "原生完整输入 feature；labels shift 由编码规则决定",
+              "dtype": "InputFeature[L_i]",
+              "frame": "input",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "rollout_logps",
+              "doc": "实际采样 logps；引擎不提供时明确缺失",
+              "dtype": "float32[T_i]",
+              "frame": "response",
+              "required": false,
+              "guarded": true
+            },
+            {
+              "name": "messages",
+              "doc": "保留完整多轮消息及工具结果",
+              "dtype": "messages[B]",
               "frame": "row",
               "required": true,
               "guarded": false
             },
             {
-              "name": "scorer_ids",
-              "doc": "按接线声明顺序的列身份",
-              "dtype": "str[C]",
+              "name": "sampling_masks",
+              "doc": "采样支持集合",
+              "dtype": "SamplingMask[T_i]",
+              "frame": "response",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "policy_version",
+              "doc": "控制面准入时确定的参数版本",
+              "dtype": "int",
               "frame": "",
-              "required": true,
+              "required": false,
               "guarded": false
             },
             {
-              "name": "valid_mask",
-              "doc": "评分实际是否存在",
-              "dtype": "bool[B,C]",
-              "frame": "row",
-              "required": true,
+              "name": "extra",
+              "doc": "原生扩展字段，不丢弃多模态和业务列",
+              "dtype": "dict",
+              "frame": "",
+              "required": false,
               "guarded": false
+            },
+            {
+              "name": "rewards",
+              "doc": "具名评分列：orm 具名 scorer→float|null、env float、baseline 具名 scorer→float|null",
+              "dtype": "dict",
+              "frame": "",
+              "required": false,
+              "guarded": true
+            },
+            {
+              "name": "prm_segments",
+              "doc": "PRM 段原始事实：段结束轮与具名原始分数",
+              "dtype": "dict",
+              "frame": "",
+              "required": false,
+              "guarded": true
             },
             {
               "name": "batch_id",
@@ -797,31 +1023,159 @@
               "frame": "row",
               "required": false,
               "guarded": true
+            },
+            {
+              "name": "tokenizer_fingerprint",
+              "doc": "tokenizer 与编码规则指纹",
+              "dtype": "str",
+              "frame": "",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "response_token_ids",
+              "doc": "每行实际响应 token 身份",
+              "dtype": "int64[T_i]",
+              "frame": "response",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "response_loss_mask",
+              "doc": "与响应 token 一一对应的训练 mask",
+              "dtype": "bool[T_i]",
+              "frame": "response",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "token_frame",
+              "doc": "轮次、输入与响应 token 的位置映射",
+              "dtype": "dict[B]",
+              "frame": "",
+              "required": true,
+              "guarded": true
             }
           ],
           "cardinality": "B 行；ragged token 长度 L_i/T_i",
-          "alignment": "batch_id + row_ids/order + group_ids/pair_ids（若有）",
-          "layout": "worker 数值字段投射",
+          "alignment": "batch_id + row_ids/order + group_ids/pair_ids（若有） + tokenizer_fingerprint + response_token_ids + response_loss_mask + token_frame",
+          "layout": "list[Trajectory]",
           "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
         },
         {
-          "profile": "process",
-          "doc": "精确响应 token 上的过程评分。",
+          "profile": "train_ready",
+          "doc": "scored + 训练目标列（advantages/returns/old_logps/ref_logps/teacher_logps/old_values）。",
           "fields": [
             {
-              "name": "values",
-              "doc": "过程评分",
-              "dtype": "float32[B,T_i]",
+              "name": "encoded",
+              "doc": "原生完整输入 feature；labels shift 由编码规则决定",
+              "dtype": "InputFeature[L_i]",
+              "frame": "input",
+              "required": true,
+              "guarded": true
+            },
+            {
+              "name": "rollout_logps",
+              "doc": "实际采样 logps；引擎不提供时明确缺失",
+              "dtype": "float32[T_i]",
               "frame": "response",
+              "required": false,
+              "guarded": true
+            },
+            {
+              "name": "messages",
+              "doc": "保留完整多轮消息及工具结果",
+              "dtype": "messages[B]",
+              "frame": "row",
               "required": true,
               "guarded": false
             },
             {
-              "name": "valid_mask",
-              "doc": "实际评分支持位置",
-              "dtype": "bool[B,T_i]",
+              "name": "sampling_masks",
+              "doc": "采样支持集合",
+              "dtype": "SamplingMask[T_i]",
               "frame": "response",
-              "required": true,
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "policy_version",
+              "doc": "控制面准入时确定的参数版本",
+              "dtype": "int",
+              "frame": "",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "extra",
+              "doc": "原生扩展字段，不丢弃多模态和业务列",
+              "dtype": "dict",
+              "frame": "",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "rewards",
+              "doc": "具名评分列：orm 具名 scorer→float|null、env float、baseline 具名 scorer→float|null",
+              "dtype": "dict",
+              "frame": "",
+              "required": false,
+              "guarded": true
+            },
+            {
+              "name": "prm_segments",
+              "doc": "PRM 段原始事实：段结束轮与具名原始分数",
+              "dtype": "dict",
+              "frame": "",
+              "required": false,
+              "guarded": true
+            },
+            {
+              "name": "advantages",
+              "doc": "响应帧优势",
+              "dtype": "float32[T_i]",
+              "frame": "response",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "returns",
+              "doc": "响应帧回报",
+              "dtype": "float32[T_i]",
+              "frame": "response",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "old_logps",
+              "doc": "采样或更新前策略 logps",
+              "dtype": "float32[T_i]",
+              "frame": "response",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "ref_logps",
+              "doc": "参考前向 logps",
+              "dtype": "float32[T_i]",
+              "frame": "response",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "teacher_logps",
+              "doc": "教师前向 logps",
+              "dtype": "float32[T_i]",
+              "frame": "response",
+              "required": false,
+              "guarded": false
+            },
+            {
+              "name": "old_values",
+              "doc": "更新前 critic 估值快照",
+              "dtype": "float32[T_i]",
+              "frame": "response",
+              "required": false,
               "guarded": false
             },
             {
@@ -891,28 +1245,28 @@
           ],
           "cardinality": "B 行；ragged token 长度 L_i/T_i",
           "alignment": "batch_id + row_ids/order + group_ids/pair_ids（若有） + tokenizer_fingerprint + response_token_ids + response_loss_mask + token_frame",
-          "layout": "",
+          "layout": "list[Trajectory]",
           "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
         }
       ],
       "allows": [
-        "REWARD"
+        "TRAJ"
       ]
     },
-    "SIGNAL": {
-      "kind": "SIGNAL",
-      "doc": "前向或纯数值计算输出；不携带 ref/teacher/old 等下游用途。",
+    "MODEL_OUTPUT": {
+      "kind": "MODEL_OUTPUT",
+      "doc": "前向结果或纯数值输出；字段能力是 profile，前向角色由消费口表示。",
       "reference": false,
       "profiles": [
         {
           "profile": "logps",
-          "doc": "输入或响应 frame 的 log-probabilities。",
+          "doc": "逐 token log-probabilities（响应或完整输入 frame，按请求声明）。",
           "fields": [
             {
               "name": "values",
               "doc": "逐 token logps",
-              "dtype": "float32[B,L_i]|float32[B,T_i]",
-              "frame": "input|response",
+              "dtype": "float32[B,T_i]|float32[B,L_i]",
+              "frame": "response|input",
               "required": true,
               "guarded": false
             },
@@ -1004,7 +1358,7 @@
         },
         {
           "profile": "values",
-          "doc": "value head 输出或显式 returns。",
+          "doc": "value head 逐 token 估值（响应 frame）。",
           "fields": [
             {
               "name": "values",
@@ -1102,135 +1456,13 @@
         },
         {
           "profile": "logits",
-          "doc": "完整词表输出，不允许 top-k 冒充。",
+          "doc": "完整词表输出（输入 frame），不允许 top-k 冒充。",
           "fields": [
             {
               "name": "values",
               "doc": "全词表 logits",
               "dtype": "float32[B,L,V]",
               "frame": "input",
-              "required": true,
-              "guarded": false
-            },
-            {
-              "name": "model_id",
-              "doc": "前向模型对象身份；纯数值结果保留来源集合",
-              "dtype": "str|str[]",
-              "frame": "",
-              "required": false,
-              "guarded": false
-            },
-            {
-              "name": "parameter_version",
-              "doc": "实际前向所用模型版本",
-              "dtype": "int|int[]",
-              "frame": "",
-              "required": false,
-              "guarded": false
-            },
-            {
-              "name": "batch_id",
-              "doc": "source 分配的稳定批次身份",
-              "dtype": "str",
-              "frame": "",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "row_ids",
-              "doc": "按实际行顺序排列的稳定身份",
-              "dtype": "str[B]",
-              "frame": "row",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "group_ids",
-              "doc": "显式完整分组身份",
-              "dtype": "str[B]",
-              "frame": "row",
-              "required": false,
-              "guarded": true
-            },
-            {
-              "name": "pair_ids",
-              "doc": "成对数据的原子身份",
-              "dtype": "str[B]",
-              "frame": "row",
-              "required": false,
-              "guarded": true
-            },
-            {
-              "name": "tokenizer_fingerprint",
-              "doc": "tokenizer 与编码规则指纹",
-              "dtype": "str",
-              "frame": "",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "response_token_ids",
-              "doc": "每行实际响应 token 身份",
-              "dtype": "int64[T_i]",
-              "frame": "response",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "response_loss_mask",
-              "doc": "与响应 token 一一对应的训练 mask",
-              "dtype": "bool[T_i]",
-              "frame": "response",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "token_frame",
-              "doc": "轮次、输入与响应 token 的位置映射",
-              "dtype": "dict[B]",
-              "frame": "",
-              "required": true,
-              "guarded": true
-            }
-          ],
-          "cardinality": "B 行；ragged token 长度 L_i/T_i",
-          "alignment": "batch_id + row_ids/order + group_ids/pair_ids（若有） + tokenizer_fingerprint + response_token_ids + response_loss_mask + token_frame",
-          "layout": "",
-          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
-        },
-        {
-          "profile": "topk",
-          "doc": "全局词表上的真实 top-k。",
-          "fields": [
-            {
-              "name": "indices",
-              "doc": "TP 全局词表 token IDs",
-              "dtype": "int64[B,L,K]",
-              "frame": "input",
-              "required": true,
-              "guarded": false
-            },
-            {
-              "name": "logprobs",
-              "doc": "温度归一化后的 top-k logps",
-              "dtype": "float32[B,L,K]",
-              "frame": "input",
-              "required": true,
-              "guarded": false
-            },
-            {
-              "name": "vocab_size",
-              "doc": "全局词表范围",
-              "dtype": "int",
-              "frame": "",
-              "required": true,
-              "guarded": false
-            },
-            {
-              "name": "temperature",
-              "doc": "计算分布的温度",
-              "dtype": "float",
-              "frame": "",
               "required": true,
               "guarded": false
             },
@@ -1602,149 +1834,7 @@
         }
       ],
       "allows": [
-        "SIGNAL"
-      ]
-    },
-    "ADV": {
-      "kind": "ADV",
-      "doc": "仅由评分与显式 values/baseline 计算的优势估计。",
-      "reference": false,
-      "profiles": [
-        {
-          "profile": "row",
-          "doc": "每行优势。",
-          "fields": [
-            {
-              "name": "values",
-              "doc": "优势",
-              "dtype": "float32[B]",
-              "frame": "row",
-              "required": true,
-              "guarded": false
-            },
-            {
-              "name": "batch_id",
-              "doc": "source 分配的稳定批次身份",
-              "dtype": "str",
-              "frame": "",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "row_ids",
-              "doc": "按实际行顺序排列的稳定身份",
-              "dtype": "str[B]",
-              "frame": "row",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "group_ids",
-              "doc": "显式完整分组身份",
-              "dtype": "str[B]",
-              "frame": "row",
-              "required": false,
-              "guarded": true
-            },
-            {
-              "name": "pair_ids",
-              "doc": "成对数据的原子身份",
-              "dtype": "str[B]",
-              "frame": "row",
-              "required": false,
-              "guarded": true
-            }
-          ],
-          "cardinality": "B 行；ragged token 长度 L_i/T_i",
-          "alignment": "batch_id + row_ids/order + group_ids/pair_ids（若有）",
-          "layout": "",
-          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
-        },
-        {
-          "profile": "token",
-          "doc": "响应 token 优势；returns 使用独立 SIGNAL.values 输出。",
-          "fields": [
-            {
-              "name": "values",
-              "doc": "优势",
-              "dtype": "float32[B,T_i]",
-              "frame": "response",
-              "required": true,
-              "guarded": false
-            },
-            {
-              "name": "batch_id",
-              "doc": "source 分配的稳定批次身份",
-              "dtype": "str",
-              "frame": "",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "row_ids",
-              "doc": "按实际行顺序排列的稳定身份",
-              "dtype": "str[B]",
-              "frame": "row",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "group_ids",
-              "doc": "显式完整分组身份",
-              "dtype": "str[B]",
-              "frame": "row",
-              "required": false,
-              "guarded": true
-            },
-            {
-              "name": "pair_ids",
-              "doc": "成对数据的原子身份",
-              "dtype": "str[B]",
-              "frame": "row",
-              "required": false,
-              "guarded": true
-            },
-            {
-              "name": "tokenizer_fingerprint",
-              "doc": "tokenizer 与编码规则指纹",
-              "dtype": "str",
-              "frame": "",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "response_token_ids",
-              "doc": "每行实际响应 token 身份",
-              "dtype": "int64[T_i]",
-              "frame": "response",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "response_loss_mask",
-              "doc": "与响应 token 一一对应的训练 mask",
-              "dtype": "bool[T_i]",
-              "frame": "response",
-              "required": true,
-              "guarded": true
-            },
-            {
-              "name": "token_frame",
-              "doc": "轮次、输入与响应 token 的位置映射",
-              "dtype": "dict[B]",
-              "frame": "",
-              "required": true,
-              "guarded": true
-            }
-          ],
-          "cardinality": "B 行；ragged token 长度 L_i/T_i",
-          "alignment": "batch_id + row_ids/order + group_ids/pair_ids（若有） + tokenizer_fingerprint + response_token_ids + response_loss_mask + token_frame",
-          "layout": "",
-          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
-        }
-      ],
-      "allows": [
-        "ADV"
+        "MODEL_OUTPUT"
       ]
     },
     "CTRL": {
@@ -1814,10 +1904,10 @@
               "guarded": false
             }
           ],
-          "cardinality": "",
-          "alignment": "",
+          "cardinality": "1",
+          "alignment": "显式全局 frame",
           "layout": "",
-          "references": ""
+          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
         }
       ],
       "allows": [
@@ -1858,10 +1948,10 @@
               "guarded": false
             }
           ],
-          "cardinality": "",
-          "alignment": "",
+          "cardinality": "1",
+          "alignment": "显式全局 frame",
           "layout": "",
-          "references": ""
+          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
         }
       ],
       "allows": [
@@ -1902,10 +1992,10 @@
               "guarded": false
             }
           ],
-          "cardinality": "",
-          "alignment": "",
+          "cardinality": "1",
+          "alignment": "显式全局 frame",
           "layout": "",
-          "references": ""
+          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
         },
         {
           "profile": "training",
@@ -1936,10 +2026,10 @@
               "guarded": false
             }
           ],
-          "cardinality": "",
-          "alignment": "",
+          "cardinality": "1",
+          "alignment": "显式全局 frame",
           "layout": "",
-          "references": ""
+          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
         },
         {
           "profile": "dataset",
@@ -1970,10 +2060,10 @@
               "guarded": false
             }
           ],
-          "cardinality": "",
-          "alignment": "",
+          "cardinality": "1",
+          "alignment": "显式全局 frame",
           "layout": "",
-          "references": ""
+          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
         },
         {
           "profile": "report",
@@ -2004,10 +2094,10 @@
               "guarded": false
             }
           ],
-          "cardinality": "",
-          "alignment": "",
+          "cardinality": "1",
+          "alignment": "显式全局 frame",
           "layout": "",
-          "references": ""
+          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
         },
         {
           "profile": "publication",
@@ -2038,10 +2128,10 @@
               "guarded": false
             }
           ],
-          "cardinality": "",
-          "alignment": "",
+          "cardinality": "1",
+          "alignment": "显式全局 frame",
           "layout": "",
-          "references": ""
+          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
         }
       ],
       "allows": [
@@ -2074,10 +2164,10 @@
               "guarded": false
             }
           ],
-          "cardinality": "",
-          "alignment": "",
+          "cardinality": "1",
+          "alignment": "显式全局 frame",
           "layout": "",
-          "references": ""
+          "references": "local 原生值或 infra 字段/分片引用；计算 worker resolve，driver 仅持小型身份与完成回执"
         }
       ],
       "allows": [
@@ -2377,7 +2467,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "MODEL",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "resource"
     },
     "dataset": {
       "type": "dataset",
@@ -2446,7 +2537,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "resource"
     },
     "sampler": {
       "type": "sampler",
@@ -2627,7 +2719,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "SAMPLER",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "resource"
     },
     "rollout": {
       "type": "rollout",
@@ -2814,7 +2907,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "resource"
     },
     "group_rule": {
       "type": "group_rule",
@@ -2886,7 +2980,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "algorithm"
     },
     "loss": {
       "type": "loss",
@@ -3005,7 +3100,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "algorithm"
     },
     "scorer": {
       "type": "scorer",
@@ -3092,7 +3188,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "algorithm"
     },
     "toolset": {
       "type": "toolset",
@@ -3143,7 +3240,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "resource"
     },
     "sandbox_env": {
       "type": "sandbox_env",
@@ -3235,7 +3333,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "ENV",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "resource"
     },
     "api_endpoint": {
       "type": "api_endpoint",
@@ -3340,7 +3439,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "ENDPOINT",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "resource"
     },
     "code_component": {
       "type": "code_component",
@@ -3472,7 +3572,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "algorithm"
     },
     "dataloader": {
       "type": "dataloader",
@@ -3664,13 +3765,14 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "runtime"
     },
     "streaming_driver": {
       "type": "streaming_driver",
       "label": "流式采样",
       "lifecycle": "Iterator",
-      "math_doc": "采样准入、滞后、背压和批次确认控制面。",
+      "math_doc": "采样准入、滞后、背压和批次确认控制面；接线评分器时逐 episode 打分，交付合并具名列。",
       "ports_in": [
         {
           "key": "prompts",
@@ -3718,6 +3820,21 @@
           "profile_param": ""
         },
         {
+          "key": "scorers",
+          "kind": "SCORER",
+          "role": "准入前评分绑定：组规则与交付列共用同一 scorer 身份",
+          "profiles": [],
+          "many": true,
+          "optional": true,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
+          "profile_param": ""
+        },
+        {
           "key": "groups",
           "kind": "GROUP_RULE",
           "role": "完整组规则",
@@ -3750,11 +3867,12 @@
       ],
       "ports_out": [
         {
-          "key": "samples",
+          "key": "traj",
           "kind": "TRAJ",
-          "role": "当前轨迹",
+          "role": "当前轨迹（评分器接线时携带具名评分列）",
           "profiles": [
-            "rollout"
+            "rollout",
+            "scored"
           ],
           "many": false,
           "optional": false,
@@ -4028,7 +4146,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "runtime"
     },
     "challenger": {
       "type": "challenger",
@@ -4279,7 +4398,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "algorithm"
     },
     "generate": {
       "type": "generate",
@@ -4337,7 +4457,7 @@
       ],
       "ports_out": [
         {
-          "key": "samples",
+          "key": "traj",
           "kind": "TRAJ",
           "role": "生成轨迹",
           "profiles": [
@@ -4403,20 +4523,22 @@
       ],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "algorithm"
     },
     "score": {
       "type": "score",
       "label": "评分",
       "lifecycle": "Stage",
-      "math_doc": "按接线声明的评分器对齐打分列；缺失不截断也不补零。",
+      "math_doc": "对接线的具名评分器打分，具名列写回轨迹；缺失不截断也不补零。",
       "ports_in": [
         {
-          "key": "samples",
+          "key": "traj",
           "kind": "TRAJ",
           "role": "待评分轨迹",
           "profiles": [
-            "rollout"
+            "rollout",
+            "scored"
           ],
           "many": false,
           "optional": false,
@@ -4446,11 +4568,11 @@
       ],
       "ports_out": [
         {
-          "key": "reward",
-          "kind": "REWARD",
-          "role": "结果评分",
+          "key": "traj",
+          "kind": "TRAJ",
+          "role": "携带具名评分列的轨迹",
           "profiles": [
-            "outcome"
+            "scored"
           ],
           "many": false,
           "optional": false,
@@ -4463,14 +4585,14 @@
           "profile_param": ""
         },
         {
-          "key": "process",
-          "kind": "REWARD",
-          "role": "过程评分",
+          "key": "metric",
+          "kind": "METRIC",
+          "role": "本批评分摘要",
           "profiles": [
-            "process"
+            "summary"
           ],
           "many": false,
-          "optional": true,
+          "optional": false,
           "accepted_kinds": [],
           "access": "read",
           "control": false,
@@ -4487,13 +4609,14 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "algorithm"
     },
     "model_forward": {
       "type": "model_forward",
       "label": "模型前向",
       "lifecycle": "Stage",
-      "math_doc": "按显式字段集合返回原生模型输出，调用方式不改变模型身份。",
+      "math_doc": "按显式字段集合的一次独立前向；输出是完整 ModelOutput，logps/values 走响应 frame。",
       "ports_in": [
         {
           "key": "model",
@@ -4531,87 +4654,17 @@
       ],
       "ports_out": [
         {
-          "key": "logps",
-          "kind": "SIGNAL",
-          "role": "logps",
-          "profiles": [
-            "logps"
-          ],
+          "key": "out",
+          "kind": "MODEL_OUTPUT",
+          "role": "完整前向结果；字段由 outputs 参数声明",
+          "profiles": [],
           "many": false,
-          "optional": true,
+          "optional": false,
           "accepted_kinds": [],
           "access": "read",
           "control": false,
           "scope": false,
-          "enabled_by": "outputs",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "values",
-          "kind": "SIGNAL",
-          "role": "values",
-          "profiles": [
-            "values"
-          ],
-          "many": false,
-          "optional": true,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "outputs",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "logits",
-          "kind": "SIGNAL",
-          "role": "logits",
-          "profiles": [
-            "logits"
-          ],
-          "many": false,
-          "optional": true,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "outputs",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "topk",
-          "kind": "SIGNAL",
-          "role": "topk",
-          "profiles": [
-            "topk"
-          ],
-          "many": false,
-          "optional": true,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "outputs",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "embeddings",
-          "kind": "SIGNAL",
-          "role": "embeddings",
-          "profiles": [
-            "embeddings"
-          ],
-          "many": false,
-          "optional": true,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "outputs",
+          "enabled_by": "",
           "mirror_input": "",
           "profile_param": ""
         }
@@ -4677,7 +4730,7 @@
           "default": [
             "logps"
           ],
-          "doc": "",
+          "doc": "logps/values 请求响应 frame；logits/embeddings 保持完整输入 frame",
           "options": [],
           "group": "",
           "type": "list",
@@ -4692,7 +4745,6 @@
             "logps",
             "values",
             "logits",
-            "topk",
             "embeddings"
           ],
           "unique_items": true
@@ -4734,24 +4786,6 @@
           "unique_items": false
         },
         {
-          "name": "top_k",
-          "label": "Top-k 宽度",
-          "default": 32,
-          "doc": "",
-          "options": [],
-          "group": "",
-          "type": "int",
-          "required": false,
-          "nullable": false,
-          "minimum": 1,
-          "maximum": null,
-          "phase": "call",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        },
-        {
           "name": "micro_batch_size",
           "label": "前向微批大小",
           "default": 1,
@@ -4776,53 +4810,25 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "remote"
+      "execution": "remote",
+      "surface": "algorithm"
     },
-    "reduce": {
-      "type": "reduce",
-      "label": "归约",
+    "privileged_view": {
+      "type": "privileged_view",
+      "label": "特权提示",
       "lifecycle": "Stage",
-      "math_doc": "按显式轴、mask 和权重做数值归约，不访问模型。",
+      "math_doc": "按行内 teacher_prompt 重编码教师视图；无该列的行原样传递，策略主轨迹不回写。",
       "ports_in": [
         {
-          "key": "signal",
-          "kind": "SIGNAL",
-          "role": "数值输入",
-          "profiles": [],
+          "key": "traj",
+          "kind": "TRAJ",
+          "role": "携带 teacher_prompt 列的轨迹",
+          "profiles": [
+            "rollout",
+            "scored"
+          ],
           "many": false,
           "optional": false,
-          "accepted_kinds": [
-            "ADV"
-          ],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "mask",
-          "kind": "SIGNAL",
-          "role": "明确 mask",
-          "profiles": [],
-          "many": false,
-          "optional": true,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "weights",
-          "kind": "SIGNAL",
-          "role": "数值权重",
-          "profiles": [],
-          "many": false,
-          "optional": true,
           "accepted_kinds": [],
           "access": "read",
           "control": false,
@@ -4834,10 +4840,13 @@
       ],
       "ports_out": [
         {
-          "key": "out",
-          "kind": "SIGNAL",
-          "role": "数学归约结果",
-          "profiles": [],
+          "key": "traj",
+          "kind": "TRAJ",
+          "role": "教师前向视图",
+          "profiles": [
+            "rollout",
+            "scored"
+          ],
           "many": false,
           "optional": false,
           "accepted_kinds": [],
@@ -4846,71 +4855,59 @@
           "scope": false,
           "enabled_by": "",
           "mirror_input": "",
-          "profile_param": "output_profile"
+          "profile_param": ""
         }
       ],
       "params": [
         {
-          "name": "op",
-          "label": "算子",
-          "default": "mean",
+          "name": "tokenizer",
+          "label": "Tokenizer 来源（id/路径，与教师一致）",
+          "default": "",
           "doc": "",
-          "options": [
-            "sum",
-            "mean",
-            "variance",
-            "logsumexp"
-          ],
+          "options": [],
           "group": "",
           "type": "str",
-          "required": false,
+          "required": true,
           "nullable": false,
           "minimum": null,
           "maximum": null,
-          "phase": "call",
+          "phase": "construct",
           "secret": false,
           "item_type": "",
           "item_options": [],
           "unique_items": false
         },
         {
-          "name": "axis",
-          "label": "归约轴",
-          "default": "token",
-          "doc": "",
-          "options": [
-            "token",
-            "row",
-            "group"
-          ],
+          "name": "model_config",
+          "label": "模型加载配置",
+          "default": {},
+          "doc": "tokenizer 加载所需的身份字段（如本地目录的 model_type）",
+          "options": [],
           "group": "",
-          "type": "str",
+          "type": "dict",
           "required": false,
           "nullable": false,
           "minimum": null,
           "maximum": null,
-          "phase": "call",
+          "phase": "construct",
           "secret": false,
           "item_type": "",
           "item_options": [],
           "unique_items": false
         },
         {
-          "name": "output_profile",
-          "label": "结果 Profile",
-          "default": "row",
+          "name": "template_config",
+          "label": "编码配置",
+          "default": {},
           "doc": "",
-          "options": [
-            "row",
-            "scalar"
-          ],
+          "options": [],
           "group": "",
-          "type": "str",
+          "type": "dict",
           "required": false,
           "nullable": false,
           "minimum": null,
           "maximum": null,
-          "phase": "call",
+          "phase": "construct",
           "secret": false,
           "item_type": "",
           "item_options": [],
@@ -4923,267 +4920,84 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "remote"
-    },
-    "reward_shape": {
-      "type": "reward_shape",
-      "label": "奖励整形",
-      "lifecycle": "Stage",
-      "math_doc": "r - baseline - beta*KL；KL 必须两路前向或显式已计算数值。",
-      "ports_in": [
-        {
-          "key": "reward",
-          "kind": "REWARD",
-          "role": "原评分",
-          "profiles": [
-            "outcome",
-            "process"
-          ],
-          "many": false,
-          "optional": false,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "logps",
-          "kind": "SIGNAL",
-          "role": "被比较 logps",
-          "profiles": [
-            "logps"
-          ],
-          "many": false,
-          "optional": true,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "reference",
-          "kind": "SIGNAL",
-          "role": "比较基准 logps",
-          "profiles": [
-            "logps"
-          ],
-          "many": false,
-          "optional": true,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "baseline",
-          "kind": "SIGNAL",
-          "role": "明确基线",
-          "profiles": [
-            "row",
-            "scalar"
-          ],
-          "many": false,
-          "optional": true,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        }
-      ],
-      "ports_out": [
-        {
-          "key": "reward",
-          "kind": "REWARD",
-          "role": "整形奖励",
-          "profiles": [],
-          "many": false,
-          "optional": false,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": "profile"
-        }
-      ],
-      "params": [
-        {
-          "name": "beta",
-          "label": "KL 系数",
-          "default": 0.0,
-          "doc": "",
-          "options": [],
-          "group": "",
-          "type": "float",
-          "required": false,
-          "nullable": false,
-          "minimum": 0,
-          "maximum": null,
-          "phase": "call",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        },
-        {
-          "name": "kl",
-          "label": "KL 估计",
-          "default": "none",
-          "doc": "",
-          "options": [
-            "none",
-            "k1",
-            "k2",
-            "k3"
-          ],
-          "group": "",
-          "type": "str",
-          "required": false,
-          "nullable": false,
-          "minimum": null,
-          "maximum": null,
-          "phase": "call",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        },
-        {
-          "name": "profile",
-          "label": "结果 Profile",
-          "default": "outcome",
-          "doc": "",
-          "options": [
-            "outcome",
-            "process"
-          ],
-          "group": "",
-          "type": "str",
-          "required": false,
-          "nullable": false,
-          "minimum": null,
-          "maximum": null,
-          "phase": "call",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        }
-      ],
-      "factory": "",
-      "client_factory": "",
-      "effects": [],
-      "exclusive_inputs": [],
-      "required_when": [
-        [
-          "kl",
-          "k1",
-          [
-            "logps",
-            "reference"
-          ]
-        ],
-        [
-          "kl",
-          "k2",
-          [
-            "logps",
-            "reference"
-          ]
-        ],
-        [
-          "kl",
-          "k3",
-          [
-            "logps",
-            "reference"
-          ]
-        ]
-      ],
-      "owner_kind": "",
-      "execution": "remote"
+      "execution": "remote",
+      "surface": "algorithm"
     },
     "advantage": {
       "type": "advantage",
       "label": "优势估计",
       "lifecycle": "Stage",
-      "math_doc": "仅消费奖励、分组身份与显式 values/baseline；不执行前向。",
+      "math_doc": "轨迹与前向 lane 进、训练目标列回轨迹；不持模型、不执行前向。",
       "ports_in": [
-        {
-          "key": "reward",
-          "kind": "REWARD",
-          "role": "实际奖励",
-          "profiles": [
-            "outcome",
-            "process"
-          ],
-          "many": false,
-          "optional": false,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "values",
-          "kind": "SIGNAL",
-          "role": "值函数估计",
-          "profiles": [
-            "values"
-          ],
-          "many": false,
-          "optional": true,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
-          "key": "baseline",
-          "kind": "SIGNAL",
-          "role": "显式基线",
-          "profiles": [
-            "row",
-            "scalar"
-          ],
-          "many": false,
-          "optional": true,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        },
         {
           "key": "traj",
           "kind": "TRAJ",
-          "role": "批次分组与 token 身份",
+          "role": "携带具名评分列的轨迹",
           "profiles": [
-            "rollout"
+            "scored"
           ],
           "many": false,
           "optional": false,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
+          "profile_param": ""
+        },
+        {
+          "key": "ref_out",
+          "kind": "MODEL_OUTPUT",
+          "role": "参考前向（kl_in_reward/损失所需）",
+          "profiles": [],
+          "many": false,
+          "optional": true,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
+          "profile_param": ""
+        },
+        {
+          "key": "teacher_out",
+          "kind": "MODEL_OUTPUT",
+          "role": "教师前向（重加权/SDAR）",
+          "profiles": [],
+          "many": false,
+          "optional": true,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
+          "profile_param": ""
+        },
+        {
+          "key": "old_out",
+          "kind": "MODEL_OUTPUT",
+          "role": "更新前策略前向（重要性采样/诊断）",
+          "profiles": [],
+          "many": false,
+          "optional": true,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
+          "profile_param": ""
+        },
+        {
+          "key": "value_out",
+          "kind": "MODEL_OUTPUT",
+          "role": "更新前 critic 前向（gae）",
+          "profiles": [],
+          "many": false,
+          "optional": true,
           "accepted_kinds": [],
           "access": "read",
           "control": false,
@@ -5195,29 +5009,14 @@
       ],
       "ports_out": [
         {
-          "key": "adv",
-          "kind": "ADV",
-          "role": "优势",
-          "profiles": [],
-          "many": false,
-          "optional": false,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": "profile"
-        },
-        {
-          "key": "returns",
-          "kind": "SIGNAL",
-          "role": "独立 returns",
+          "key": "traj",
+          "kind": "TRAJ",
+          "role": "携带训练目标列的轨迹",
           "profiles": [
-            "values"
+            "train_ready"
           ],
           "many": false,
-          "optional": true,
+          "optional": false,
           "accepted_kinds": [],
           "access": "read",
           "control": false,
@@ -5227,12 +5026,14 @@
           "profile_param": ""
         },
         {
-          "key": "old_logps",
-          "kind": "SIGNAL",
-          "role": "采样侧 logps（重要性采样基线）",
-          "profiles": [],
+          "key": "metric",
+          "kind": "METRIC",
+          "role": "估计摘要",
+          "profiles": [
+            "summary"
+          ],
           "many": false,
-          "optional": true,
+          "optional": false,
           "accepted_kinds": [],
           "access": "read",
           "control": false,
@@ -5272,67 +5073,10 @@
           "unique_items": false
         },
         {
-          "name": "profile",
-          "label": "结果 Profile",
-          "default": "row",
-          "doc": "",
-          "options": [
-            "row",
-            "token"
-          ],
-          "group": "",
-          "type": "str",
-          "required": false,
-          "nullable": false,
-          "minimum": null,
-          "maximum": null,
-          "phase": "call",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        },
-        {
-          "name": "gamma",
-          "label": "折扣",
-          "default": 1.0,
-          "doc": "",
-          "options": [],
-          "group": "",
-          "type": "float",
-          "required": false,
-          "nullable": false,
-          "minimum": 0,
-          "maximum": 1,
-          "phase": "call",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        },
-        {
-          "name": "lam",
-          "label": "GAE lambda",
-          "default": 1.0,
-          "doc": "",
-          "options": [],
-          "group": "",
-          "type": "float",
-          "required": false,
-          "nullable": false,
-          "minimum": 0,
-          "maximum": 1,
-          "phase": "call",
-          "secret": false,
-          "item_type": "",
-          "item_options": [],
-          "unique_items": false
-        },
-        {
           "name": "num_generations",
           "label": "分组宽度",
           "default": 8,
-          "doc": "",
+          "doc": "必须与上游生成/驱动节点一致；组内估计按完整组进行",
           "options": [],
           "group": "",
           "type": "int",
@@ -5348,9 +5092,9 @@
         },
         {
           "name": "kwargs",
-          "label": "估计参数",
+          "label": "估计器构造参数",
           "default": {},
-          "doc": "",
+          "doc": "Advantage 构造旋钮（gamma/gae_lambda/normalize/kl_coef/beta/kl_in_reward 等）；未被该估计器读取的旋钮会被拒绝",
           "options": [],
           "group": "",
           "type": "dict",
@@ -5374,19 +5118,13 @@
           "estimator",
           "gae",
           [
-            "values"
-          ]
-        ],
-        [
-          "estimator",
-          "remax",
-          [
-            "baseline"
+            "value_out"
           ]
         ]
       ],
       "owner_kind": "",
-      "execution": "remote"
+      "execution": "remote",
+      "surface": "algorithm"
     },
     "signal_combine": {
       "type": "signal_combine",
@@ -5396,14 +5134,12 @@
       "ports_in": [
         {
           "key": "signals",
-          "kind": "SIGNAL",
+          "kind": "MODEL_OUTPUT",
           "role": "具名对齐数值",
           "profiles": [],
           "many": true,
           "optional": false,
-          "accepted_kinds": [
-            "ADV"
-          ],
+          "accepted_kinds": [],
           "access": "read",
           "control": false,
           "scope": false,
@@ -5415,7 +5151,7 @@
       "ports_out": [
         {
           "key": "out",
-          "kind": "SIGNAL",
+          "kind": "MODEL_OUTPUT",
           "role": "与输入数学类型一致",
           "profiles": [],
           "many": false,
@@ -5476,13 +5212,14 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "remote"
+      "execution": "remote",
+      "surface": "algorithm"
     },
     "select": {
       "type": "select",
       "label": "样本筛选",
       "lifecycle": "Stage",
-      "math_doc": "一次选择索引应用全部对齐载荷；成对与完整组不拆散。",
+      "math_doc": "一次选择索引应用全部对齐载荷；成对与完整组不拆散，奖励随轨迹保留。",
       "ports_in": [
         {
           "key": "batch",
@@ -5503,32 +5240,13 @@
           "profile_param": ""
         },
         {
-          "key": "reward",
-          "kind": "REWARD",
-          "role": "筛选评分",
-          "profiles": [
-            "outcome"
-          ],
-          "many": false,
-          "optional": false,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "",
-          "profile_param": ""
-        },
-        {
           "key": "signals",
-          "kind": "SIGNAL",
+          "kind": "MODEL_OUTPUT",
           "role": "具名同步筛选输入",
           "profiles": [],
           "many": true,
           "optional": true,
-          "accepted_kinds": [
-            "ADV"
-          ],
+          "accepted_kinds": [],
           "access": "read",
           "control": false,
           "scope": false,
@@ -5554,23 +5272,8 @@
           "profile_param": ""
         },
         {
-          "key": "reward",
-          "kind": "REWARD",
-          "role": "同一次选择后的评分",
-          "profiles": [],
-          "many": false,
-          "optional": false,
-          "accepted_kinds": [],
-          "access": "read",
-          "control": false,
-          "scope": false,
-          "enabled_by": "",
-          "mirror_input": "reward",
-          "profile_param": ""
-        },
-        {
           "key": "signals",
-          "kind": "SIGNAL",
+          "kind": "MODEL_OUTPUT",
           "role": "逐 slot 同步输出",
           "profiles": [],
           "many": false,
@@ -5581,6 +5284,23 @@
           "scope": false,
           "enabled_by": "",
           "mirror_input": "signals",
+          "profile_param": ""
+        },
+        {
+          "key": "metric",
+          "kind": "METRIC",
+          "role": "选择摘要（保留/丢弃计数）",
+          "profiles": [
+            "summary"
+          ],
+          "many": false,
+          "optional": false,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
           "profile_param": ""
         }
       ],
@@ -5647,7 +5367,7 @@
           "name": "num_generations",
           "label": "分组宽度",
           "default": 8,
-          "doc": "",
+          "doc": "必须与上游生成/驱动节点一致",
           "options": [],
           "group": "",
           "type": "int",
@@ -5668,13 +5388,14 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "algorithm"
     },
     "train_step": {
       "type": "train_step",
       "label": "训练步骤",
       "lifecycle": "Stage",
-      "math_doc": "真实 forward_backward 与 optimizer step；优化器与编码是参数，不负责保存和发布 cadence。",
+      "math_doc": "真实 forward_backward 与 optimizer step；训练目标从轨迹 lift，显式 lane 只作补充绑定。",
       "ports_in": [
         {
           "key": "model",
@@ -5709,7 +5430,7 @@
         {
           "key": "batch",
           "kind": "TRAJ",
-          "role": "待训练数据；轨迹在内部按 tokenizer 参数编码",
+          "role": "待训练数据；标准字段由模型侧 lift",
           "profiles": [],
           "many": false,
           "optional": false,
@@ -5725,16 +5446,43 @@
           "profile_param": ""
         },
         {
-          "key": "arguments",
-          "kind": "SIGNAL",
-          "role": "slot 是 loss 实际参数名",
+          "key": "reference",
+          "kind": "MODEL_OUTPUT",
+          "role": "参考前向（DPO/KTO 参考信号）",
+          "profiles": [],
+          "many": false,
+          "optional": true,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
+          "profile_param": ""
+        },
+        {
+          "key": "teacher",
+          "kind": "MODEL_OUTPUT",
+          "role": "教师前向（蒸馏教师信号）",
+          "profiles": [],
+          "many": false,
+          "optional": true,
+          "accepted_kinds": [],
+          "access": "read",
+          "control": false,
+          "scope": false,
+          "enabled_by": "",
+          "mirror_input": "",
+          "profile_param": ""
+        },
+        {
+          "key": "lanes",
+          "kind": "MODEL_OUTPUT",
+          "role": "显式字段绑定：slot 是字段名，自定义公式 loss 的补充 lane",
           "profiles": [],
           "many": true,
           "optional": true,
-          "accepted_kinds": [
-            "ADV",
-            "SIGNAL"
-          ],
+          "accepted_kinds": [],
           "access": "read",
           "control": false,
           "scope": false,
@@ -6068,7 +5816,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "algorithm"
     },
     "weight_sync": {
       "type": "weight_sync",
@@ -6234,7 +5983,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "runtime"
     },
     "weight_average": {
       "type": "weight_average",
@@ -6358,7 +6108,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "runtime"
     },
     "checkpoint": {
       "type": "checkpoint",
@@ -6540,7 +6291,8 @@
         ]
       ],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "runtime"
     },
     "merge": {
       "type": "merge",
@@ -6631,7 +6383,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "artifact"
     },
     "quantize": {
       "type": "quantize",
@@ -6737,7 +6490,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "artifact"
     },
     "infer": {
       "type": "infer",
@@ -6862,7 +6616,8 @@
       ],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "artifact"
     },
     "eval": {
       "type": "eval",
@@ -7019,7 +6774,8 @@
       ],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "artifact"
     },
     "deploy": {
       "type": "deploy",
@@ -7091,7 +6847,8 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "ENDPOINT",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "artifact"
     },
     "hub_push": {
       "type": "hub_push",
@@ -7257,8 +7014,9 @@
       "exclusive_inputs": [],
       "required_when": [],
       "owner_kind": "",
-      "execution": "driver"
+      "execution": "driver",
+      "surface": "artifact"
     }
   },
-  "version": 4
+  "version": 5
 }

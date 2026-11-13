@@ -4960,6 +4960,49 @@ function swiftApiPlugin(): Plugin {
             res.end(JSON.stringify({ lines: session.log }));
             return;
           }
+          /* 旧图升级：one-shot 子进程跑 GraphUpgrade.preview。声明先过
+           * normalizeGraph（与提交运行同一套序列化转换，不拿 label/value 编辑态
+           * 当执行声明）；choices 未清零时 can_confirm=false，前端展示升级问题
+           * 并禁止运行/自动保存，用户确认副本后才替换编辑态。 */
+          if (req.method === 'POST' && seg0 === 'upgrade' && !segs[1]) {
+            const body = await readJsonBody(req);
+            const graph = normalizeGraph(body?.graph ?? body);
+            const proc = spawn(resolvePython(), ['-m', 'swift.dev.webui.upgrade'], {
+              cwd: workspaceRoot(),
+              env: { ...spawnEnv(), USE_SWIFT_V5: '1' },
+              stdio: ['pipe', 'pipe', 'pipe'],
+            });
+            const chunks: Buffer[] = [];
+            const stderrTail: string[] = [];
+            proc.stdout?.on('data', (buf: Buffer) => chunks.push(buf));
+            proc.stderr?.on('data', (buf: Buffer) => {
+              stderrTail.push(buf.toString('utf-8'));
+              if (stderrTail.length > 40) stderrTail.shift();
+            });
+            /* 先喂 stdin 再等退出：close 之后才写会 EPIPE，子进程收到 EOF 才会算完回包 */
+            proc.stdin?.on('error', () => { /* 子进程提前退出时静默：退出码分支已回错误 */ });
+            try {
+              proc.stdin?.write(JSON.stringify({ graph, selections: body?.selections ?? undefined }));
+              proc.stdin?.end();
+            } catch { /* 同上：交给退出码分支 */ }
+            const exitCode = await new Promise<number | null>((resolve) => {
+              proc.on('error', () => resolve(null));
+              proc.on('close', (code) => resolve(code));
+            });
+            const raw = Buffer.concat(chunks).toString('utf-8').trim();
+            if (exitCode !== 0 || !raw.startsWith('{')) {
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({
+                error: `升级服务失败（exit=${exitCode ?? 'spawn-error'}）`,
+                detail: (stderrTail.join('') || raw || '').slice(-2000),
+              }));
+              return;
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.end(raw);
+            return;
+          }
           /* 按业务 key 查会话：编辑页回到实验时恢复运行态（在途运行/节点灯/停止入口）。
            * 页面切走只丢前端引用，会话本体常驻在这里——key 是接回引用的把手。 */
           if (req.method === 'GET' && !seg0) {

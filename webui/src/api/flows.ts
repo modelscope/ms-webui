@@ -22,6 +22,8 @@ export interface FlowSummary {
 
 /** 画布状态（编辑页 graph state 的持久形态；声明性数据，形态由编辑页定义） */
 export interface FlowGraph {
+  /** 保存时的声明版本；历史记录（v5 前）缺此字段，编辑页读入时走升级服务 */
+  version?: number;
   nodes: unknown[];
   edges: unknown[];
   frames?: unknown[];
