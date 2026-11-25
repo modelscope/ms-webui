@@ -9,7 +9,7 @@ import type { InspectorTab } from './NodeInspector';
 import { FlowAssistant } from './FlowAssistant';
 import type { RunState } from './FlowAssistant';
 import type { AiAction } from './aiAssist';
-import { NODE_TYPES, NODE_W, findPort, findPortOf, nodeDefOf, nodeLabel, paramsOf } from './nodeTypes';
+import { NODE_TYPES, NODE_W, findPort, findPortOf, nodeDefOf, nodeLabel, paramsOf, serializeNodeParams } from './nodeTypes';
 import type { TFn } from './nodeTypes';
 import type { GraphEdge, GraphFrame, GraphNode } from './nodeTypes';
 import { useT } from '@/i18n';
@@ -730,21 +730,6 @@ export function WorkflowEditorPage() {
     const typeOf = (id: string) => nodes.find((n) => n.id === id)?.type ?? '';
     const defOf = (id: string) => NODE_TYPES[typeOf(id)];
     /*
-     * 面板值恒为字符串，v3 契约要类型化参数：按 registry 声明的类型在提交
-     * 边界转换（preset 覆盖的参数没有 ptype，按名字回落 registry 默认表）。
-     * 转不动的保持原字符串——后端会点名拒绝，绝不静默猜一个值。
-     */
-    const coerceParam = (value: string, ptype?: string): unknown => {
-      if (!ptype || ptype === 'str') return value;
-      try {
-        return JSON.parse(value);
-      } catch {
-        return value;
-      }
-    };
-    const paramTypeOf = (nodeType: string, name: string): string | undefined =>
-      (NODE_TYPES[nodeType]?.params ?? []).find((p) => p.label === name)?.ptype;
-    /*
      * 资源页声明（左上角 GpuPicker）：本机模式给卡号（会话据此设
      * CUDA_VISIBLE_DEVICES 并规划 DeviceGroup），集群模式给 ray 地址 + 总卡数。
      * 只如实携带；空本机卡表会被会话响亮拒绝（空分配 = 没有 GPU）。
@@ -758,12 +743,7 @@ export function WorkflowEditorPage() {
       nodes: nodes.map((n) => ({
         id: n.id,
         type: n.type,
-        params: Object.fromEntries(
-          paramsOf(n).map((p) => [
-            p.label,
-            coerceParam(p.value, p.ptype ?? paramTypeOf(n.type, p.label)),
-          ]),
-        ),
+        params: serializeNodeParams(n),
         ...(n.code ? { code: n.code } : {}),
       })),
       edges: edges.map((e) => ({

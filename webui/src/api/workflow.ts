@@ -100,6 +100,78 @@ export interface WorkflowRunSubmission {
   command_seq: number;
 }
 
+export interface StructureTraining {
+  status: string;
+  source: 'config' | 'meta';
+  verified: boolean;
+  total_params?: number;
+  trainable_params?: number;
+  adapter_params?: number;
+  modules_to_save_params?: number;
+  frozen_params?: number;
+  parameters?: { name: string; shape: number[]; dtype: string; status: string }[];
+}
+
+export interface StructureNode {
+  id: string;
+  parent_id: string | null;
+  name: string;
+  module_path: string;
+  kind: string;
+  class_name?: string;
+  part: string;
+  repeat?: number;
+  params?: number;
+  children: string[];
+  source: 'config' | 'meta';
+  module_paths: string[];
+  details: Record<string, unknown>;
+  training?: StructureTraining;
+}
+
+export interface ModelStructure {
+  detail: 'config' | 'meta';
+  requested_detail: 'config' | 'meta';
+  model: {
+    source: string;
+    name?: string;
+    model_type?: string;
+    architectures?: string[];
+    is_multimodal?: boolean;
+    backend?: 'hf' | 'megatron';
+    parallel?: Record<string, number | boolean>;
+    config?: { text?: Record<string, unknown>; vision?: Record<string, unknown> };
+  };
+  config_fingerprint: string;
+  nodes: StructureNode[];
+  summary: {
+    total_params?: number;
+    total_params_source?: 'safetensors' | 'config-estimate' | 'meta';
+    trainable_params?: number;
+    training?: StructureTraining;
+  };
+  warnings: { code: string; message: string }[];
+  schema_version: number;
+}
+
+export async function inspectModelStructure(
+  node: WorkflowNodeDecl,
+  opts: { detail: 'config' | 'meta' },
+): Promise<ModelStructure> {
+  const res = await fetch(`${apiBase()}/api/workflow/inspect-model`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      node_id: node.id,
+      params: node.params,
+      detail: opts.detail,
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error ?? `模型结构检查失败（${res.status}）`);
+  return body as ModelStructure;
+}
+
 /** 发起一次图调用：同 workflowKey 复用常驻会话（资源不重建） */
 export async function startWorkflowRun(graph: {
   nodes: WorkflowNodeDecl[];

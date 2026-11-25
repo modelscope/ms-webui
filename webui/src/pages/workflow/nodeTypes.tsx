@@ -238,6 +238,18 @@ export interface GraphNode {
   portSides?: Record<string, 'left' | 'right'>;
 }
 
+/** 面板值恒为字符串，v3 契约要类型化参数：按 registry 声明的类型在提交边界转换。 */
+export function serializeNodeParams(node: GraphNode): Record<string, unknown> {
+  return Object.fromEntries(paramsOf(node).map((p) => {
+    if (!p.ptype || p.ptype === 'str') return [p.label, p.value];
+    try {
+      return [p.label, JSON.parse(p.value)];
+    } catch {
+      return [p.label, p.value];
+    }
+  }));
+}
+
 /**
  * 循环容器。画在节点下面一层的半透明框，标出“这一块每步重跑”。
  *

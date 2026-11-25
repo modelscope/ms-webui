@@ -1,113 +1,126 @@
-/**
- * 训练创建页的两个预检弹窗（点击弹出、可关闭）：
- * 模型可训练结构 / 数据集前 N 条预览。每卡显存与分片分组已升级为
- * 独立的并行规划器（ParallelPlanner，含 SVG 卡连接拓扑与实时 spec 调节）。
- */
-import { useEffect, useState } from 'react';
-import { Box, Loader2, Table2 } from 'lucide-react';
+/** 训练创建页的预检：右侧可训练结构 + 数据集前 N 条预览弹窗。 */
+import { useEffect, useMemo, useState } from 'react';
+import { Loader2, Table2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SegmentedControl } from '@/components/FormField';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import type { DatasetPreviewRow, ModelStructure } from '@/api/train';
-import { fmtParams, loraParams } from './memoryEstimate';
+import type { DatasetPreviewRow } from '@/api/train';
 import { useT } from '@/i18n';
+import { ModelStructurePanel } from '../workflow/ModelStructurePanel';
+import type { GraphNode } from '../workflow/nodeTypes';
+import { Panel } from '@/components/TaskDetailShell';
+import type { SpecDims } from './parallelSpec';
 
-/* ---------- 模型可训练结构弹窗 ---------- */
+const MODEL_CONFIG_KEYS = new Set([
+  'model_type', 'model_revision', 'torch_dtype', 'attn_impl', 'vit_attn_impl',
+  'language_model_only', 'new_special_tokens', 'num_labels', 'problem_type',
+]);
+const TUNER_CONFIG_KEYS = new Set([
+  'adapters', 'freeze_llm', 'freeze_vit', 'freeze_aligner', 'target_modules', 'target_regex',
+  'target_parameters', 'modules_to_save', 'lora_rank', 'lora_alpha', 'lora_dropout', 'lora_bias',
+  'use_rslora', 'use_dora', 'init_weights', 'lorap_lr_ratio', 'lorap_emb_lr', 'trainable_token_indices',
+]);
+const TRAIN_CONFIG_KEYS = new Set([
+  'learning_rate', 'freeze_parameters', 'freeze_parameters_regex', 'freeze_parameters_ratio',
+  'trainable_parameters', 'trainable_parameters_regex',
+]);
+const LIST_KEYS = new Set([
+  'adapters', 'target_modules', 'target_parameters', 'modules_to_save', 'new_special_tokens',
+  'freeze_parameters', 'trainable_parameters',
+]);
 
-export function StructureDialog({
+function parseExtraParams(extraArgs: string): Record<string, string | number | boolean> {
+  const tokens = extraArgs.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  const result: Record<string, string | number | boolean> = {};
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (!token.startsWith('--')) continue;
+    const [rawKey, inline] = token.slice(2).split(/=(.*)/s);
+    const values = inline !== undefined ? [inline] : [];
+    while (inline === undefined && i + 1 < tokens.length && !tokens[i + 1].startsWith('--')) {
+      values.push(tokens[++i]);
+    }
+    const raw = values.length
+      ? values.map((value) => value.replace(/^(['"])(.*)\1$/, '$2')).join(' ')
+      : 'true';
+    try {
+      result[rawKey] = JSON.parse(raw);
+    } catch {
+      result[rawKey] = raw;
+    }
+  }
+  return result;
+}
+
+function useInspectionNode(
+  model: string,
+  tuner: 'lora' | 'full' | 'trainable_tokens',
+  params: Record<string, string | number | boolean>,
+  extraArgs: string,
+  backend: 'transformers' | 'megatron',
+  parallel: Partial<SpecDims>,
+): GraphNode {
+  return useMemo<GraphNode>(() => {
+    const modelConfig: Record<string, unknown> = {};
+    const tunerConfig: Record<string, unknown> = {};
+    const trainConfig: Record<string, unknown> = {};
+    for (const [key, raw] of Object.entries({ ...params, ...parseExtraParams(extraArgs) })) {
+      const value = LIST_KEYS.has(key) && typeof raw === 'string'
+        ? raw.split(/[\s,]+/).filter(Boolean)
+        : key === 'trainable_token_indices' && typeof raw === 'string'
+          ? raw.split(/[\s,]+/).filter(Boolean).map(Number)
+          : raw;
+      if (MODEL_CONFIG_KEYS.has(key)) modelConfig[key] = value;
+      if (TUNER_CONFIG_KEYS.has(key)) tunerConfig[key] = value;
+      if (TRAIN_CONFIG_KEYS.has(key)) trainConfig[key] = value;
+    }
+    return {
+      id: 'train-model', type: 'model', x: 0, y: 0, status: 'idle',
+      params: [
+        { label: 'model', value: model, ptype: 'str' },
+        { label: 'train_type', value: tuner, ptype: 'str' },
+        /* registry 的 backend 词表是 hf|megatron：UI 侧的 transformers 在这里折回 hf */
+        { label: 'backend', value: backend === 'megatron' ? 'megatron' : 'hf', ptype: 'str' },
+        { label: 'parallel_spec', value: JSON.stringify(parallel), ptype: 'dict' },
+        { label: 'model_config', value: JSON.stringify(modelConfig), ptype: 'dict' },
+        { label: 'tuner_config', value: JSON.stringify(tunerConfig), ptype: 'dict' },
+        { label: 'train_config', value: JSON.stringify(trainConfig), ptype: 'dict' },
+      ],
+    };
+  }, [model, tuner, params, extraArgs, backend, parallel]);
+}
+
+export function StructurePanel({
   model,
-  structure,
-  loading,
-  error,
-  onFetch,
+  editing,
   tuner,
-  loraRank,
+  params,
+  extraArgs,
+  backend,
+  parallel,
 }: {
   model: string;
-  structure: ModelStructure | null;
-  loading: boolean;
-  error: string | null;
-  onFetch: () => void;
+  editing: boolean;
   tuner: 'lora' | 'full' | 'trainable_tokens';
-  loraRank: number;
+  params: Record<string, string | number | boolean>;
+  extraArgs: string;
+  backend: 'transformers' | 'megatron';
+  parallel: Partial<SpecDims>;
 }) {
   const { t } = useT();
-  const [open, setOpen] = useState(false);
-  /* 打开时自动探测（无结果且不在途）——错误保留，弹窗里给重新探测入口 */
-  useEffect(() => {
-    if (open && !structure && !loading && !error) onFetch();
-  }, [open, structure, loading, error, onFetch]);
+  const inspectionNode = useInspectionNode(model, tuner, params, extraArgs, backend, parallel);
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button variant="outline" size="sm" disabled={!model.trim()} className="h-7 gap-1.5 px-2.5 text-[12px]">
-          <Box className="size-3.5" />
-          {t('pre.trainableStructure')}
-          {structure ? <span className="text-muted-foreground font-normal">{fmtParams(structure.params)}</span> : null}
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>{t('pre.trainableStructure')} · {model}</DialogTitle>
-          <DialogDescription>
-            {t('pre.structureHint')}
-          </DialogDescription>
-        </DialogHeader>
-        {loading && (
-          <div className="text-muted-foreground flex items-center gap-2 text-sm">
-            <Loader2 className="size-4 animate-spin" /> {t('pre.probing')}
+    <Panel title={t('pre.trainableStructure')}>
+      <div className="flex h-[640px] flex-col">
+        {model.trim() && !editing ? (
+          <ModelStructurePanel node={inspectionNode} />
+        ) : (
+          <div className="text-muted-foreground flex flex-1 items-center justify-center text-xs">
+            {t(editing ? 'pre.finishModelStructure' : 'pre.selectModelStructure')}
           </div>
         )}
-        {error && (
-          <div className="space-y-2">
-            <p className="text-destructive text-sm leading-5">{error}</p>
-            <Button variant="outline" size="sm" onClick={onFetch}>{t('pre.reprobe')}</Button>
-          </div>
-        )}
-        {structure && (
-          <div className="space-y-3">
-            <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-sm leading-6">
-              <span>{t('pre.paramCount')} <b>{fmtParams(structure.params)}</b>{structure.paramsSource === 'config-estimate' && <span className="text-muted-foreground">{t('pre.configEstimate')}</span>}</span>
-              {structure.layers !== undefined && <span>{t('pre.layers')} <b>{structure.layers}</b></span>}
-              {structure.hidden !== undefined && <span>hidden <b>{structure.hidden}</b></span>}
-              {structure.intermediate !== undefined && <span>FFN <b>{structure.intermediate}</b></span>}
-              {structure.moeExperts !== undefined && <span className="text-amber-600 dark:text-amber-400">{t('pre.moeExperts')} <b>{structure.moeExperts}</b></span>}
-              {structure.modelType && <span className="text-muted-foreground">{structure.modelType}</span>}
-              {structure.heads !== undefined && structure.kvHeads !== undefined && (
-                <span>{t('pre.attnHeads')} <b>{structure.heads}</b> / KV <b>{structure.kvHeads}</b></span>
-              )}
-              {structure.vocab !== undefined && <span>{t('pre.vocab')} <b>{structure.vocab}</b></span>}
-            </div>
-            {tuner === 'lora' && (
-              <div className="bg-muted/50 rounded-lg p-3 text-sm leading-6">
-                {t('pre.loraTrainable', { rank: loraRank })} <b>{fmtParams(loraParams(structure, loraRank))}</b>
-                <span className="text-muted-foreground">{t('pre.loraNote', { pct: ((loraParams(structure, loraRank) / structure.params) * 100).toFixed(2) })}</span>
-              </div>
-            )}
-            {tuner === 'full' && <div className="bg-muted/50 rounded-lg p-3 text-sm">{t('pre.fullTuning')}</div>}
-            {tuner === 'trainable_tokens' && (
-              <div className="bg-muted/50 rounded-lg p-3 text-sm">
-                {t('pre.trainableTokensPrefix')} <b>{fmtParams((structure.vocab ?? 0) * (structure.hidden ?? 0))}</b>
-              </div>
-            )}
-            {structure.loraModules && Object.keys(structure.loraModules).length > 0 && (
-              <div>
-                <div className="text-muted-foreground mb-1.5 text-[11px] font-medium tracking-[0.08em] uppercase">{t('pre.loraTargets')}</div>
-                <div className="flex flex-wrap gap-1.5">
-                  {Object.entries(structure.loraModules)
-                    .sort((a, b) => b[1] - a[1])
-                    .map(([name, count]) => (
-                      <span key={name} className="bg-muted border-border/60 rounded border px-2 py-0.5 font-mono text-[12px]">
-                        {name} ×{count}
-                      </span>
-                    ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
+      </div>
+    </Panel>
   );
 }
 

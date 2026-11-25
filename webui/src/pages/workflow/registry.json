@@ -2462,7 +2462,7 @@
         }
       ],
       "factory": "",
-      "client_factory": "",
+      "client_factory": "swift.dev.webui.inspection:inspect_model_node",
       "effects": [],
       "exclusive_inputs": [],
       "required_when": [],

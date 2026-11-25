@@ -15,7 +15,7 @@ import { listCatalog, modelOption, datasetOption, listCkptCatalog, ckptOption, c
 import { listPlugins } from '@/api/plugins';
 import { listTrains, startCodeTrain, startTrain, type TrainTaskInfo, fetchDatasetPreview, fetchModelStructure, listOrmRules, type DatasetPreviewRow, type ModelStructure } from '@/api/train';
 import { listGpus, type GpuInfo } from '@/api/deploy';
-import { DatasetPreviewDialog, StructureDialog } from './TrainPreflight';
+import { DatasetPreviewDialog, StructurePanel } from './TrainPreflight';
 import { parseRlPlacement, RlGpuPlanner, type RlPlacement, type RlPlacementInfo, type RlTeacherOpts } from './RlGpuPlanner';
 import { ParallelPlanner } from './ParallelPlanner';
 import { defaultPlan, deriveGroups, planFlags, type ParallelPlan } from './parallelSpec';
@@ -39,6 +39,10 @@ import { useSettings } from '@/settings/SettingsContext';
  * kto/rm/gkd/opsd/mopd 不注册算法 metric，头部行就是 base 三键。后续训练侧
  * 往日志行多打 key=value，这里补一项（或用户自由输入）即可上图。
  */
+const MODEL_PLACEHOLDER = 'Qwen/Qwen2.5-7B-Instruct';
+/** 并行规格缺省：复用同一个空对象，避免每次 render 打穿结构面板的 memo。 */
+const NO_PARALLEL = {};
+
 const WATCH_METRICS: Record<string, string[]> = {
   sft: ['loss', 'grad_norm', 'lr', 'accuracy'],
   pt: ['loss', 'grad_norm', 'lr'],
@@ -76,6 +80,7 @@ export function TrainNewPage() {
   /** 创建形态：命令行表单 / 直接写 Python（swift.dev 原生 API，整份落盘执行） */
   const [mode, setMode] = useState<'cli' | 'code'>('cli');
   const [model, setModel] = useState('');
+  const [modelEditing, setModelEditing] = useState(false);
   const [taskType, setTaskType] = useState<TaskType>('sft');
   const [rlType, setRlType] = useState('dpo');
   const [datasets, setDatasets] = useState<string[]>([]);
@@ -1085,21 +1090,11 @@ export function TrainNewPage() {
               value={model}
               onChange={pickModel}
               options={modelOptions}
-              placeholder="Qwen/Qwen2.5-7B-Instruct"
+              placeholder={MODEL_PLACEHOLDER}
               display={pickedCkpt || undefined}
+              onEditingChange={setModelEditing}
             />
           </Field>
-          {mode === 'cli' && (
-            <StructureDialog
-              model={model}
-              structure={structure}
-              loading={structureLoading}
-              error={structureError}
-              onFetch={loadStructure}
-              tuner={tuner}
-              loraRank={loraRank}
-            />
-          )}
           {/*
            * LoRA 断点继续训：--adapters 指向训练产出的 checkpoint 目录，在原
            * adapter 上继续训练。params 键即 CLI flag（命令预览与后端拼装同源）。
@@ -1308,6 +1303,17 @@ export function TrainNewPage() {
           : t('tn.descCli', { taskType })
       }
       preview={mode === 'code' ? codePreview : preview}
+      side={mode === 'cli' ? (
+        <StructurePanel
+          model={model}
+          editing={modelEditing}
+          tuner={tuner}
+          params={params}
+          extraArgs={extraArgs}
+          backend={plan.backend}
+          parallel={plan.specs.model ?? NO_PARALLEL}
+        />
+      ) : undefined}
       fields={mode === 'code' ? [] : fields}
       extraArgs={mode === 'code' ? undefined : extraArgs}
       onExtraArgsChange={setExtraArgs}

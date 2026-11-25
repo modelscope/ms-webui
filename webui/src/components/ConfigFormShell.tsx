@@ -29,6 +29,7 @@ export function ConfigFormShell({
   desc,
   sections,
   preview,
+  side,
   warning,
   fields,
   actions,
@@ -45,6 +46,7 @@ export function ConfigFormShell({
   desc?: string;
   sections: Array<{ title: string; extra?: ReactNode; content: ReactNode }>;
   preview: string;
+  side?: ReactNode;
   warning?: string;
   /** 页面自己的提交区（提交按钮 + 校验态）；每个新建页都有真实提交动作 */
   actions: ReactNode;
@@ -134,8 +136,12 @@ export function ConfigFormShell({
             ))}
           </div>
 
-          <div className="sticky top-4 w-[420px] flex-none">
-            <Panel title={t('shell.willRun')}>
+          {/* 只有带 side 的页面才改成"右栏内部滚动"；其余新建页保持原布局。 */}
+          <div className={side
+            ? 'sticky top-4 flex max-h-[calc(100vh-2rem)] w-[420px] flex-none flex-col gap-4 overflow-y-auto'
+            : 'sticky top-4 w-[420px] flex-none'}>
+            <div className="flex-none">
+              <Panel title={t('shell.willRun')}>
               {/*
                 这里 whitespace-pre-wrap 而不是横向滚动：预览是「读」的，
                 命令太长时折行看得见全部内容比拖横条更有用；要复制的是任务目录里
@@ -167,7 +173,9 @@ export function ConfigFormShell({
                 <Info size={13} className="mt-0.5 flex-none" />
                 {t('shell.runScriptHint')}
               </div>
-            </Panel>
+              </Panel>
+            </div>
+            {side && <div className="flex-none">{side}</div>}
           </div>
         </div>
       </Column>

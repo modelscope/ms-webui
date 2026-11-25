@@ -11,13 +11,14 @@ import { Textarea } from '@/components/ui/textarea';
 import type { GraphEdge, GraphFrame, GraphNode } from './nodeTypes';
 import { NODE_TYPES, nodeDefOf, nodeLabel } from './nodeTypes';
 import { OutputPreview, OutputPreviewDialog } from './OutputPreview';
+import { ModelStructurePanel } from './ModelStructurePanel';
 
 import type { AiAction, FlowMessage } from './aiAssist';
 import { describeAction, nodeIntro, paramsOf, useFlowAiChat } from './aiAssist';
 import { useT } from '@/i18n';
 import type { MessageKey } from '@/i18n';
 
-export type InspectorTab = 'params' | 'output' | 'ai';
+export type InspectorTab = 'params' | 'structure' | 'output' | 'ai';
 type Tab = InspectorTab;
 
 /**
@@ -102,7 +103,7 @@ export function NodeInspector({
   const { t } = useT();
 
   /* 设置里把 AI 关掉时，正停在 AI 页就退回参数页——不拦的话面板下半截是空的 */
-  const active: Tab = tab === 'ai' && !aiEnabled ? 'params' : tab;
+  const active: Tab = (tab === 'ai' && !aiEnabled) || (tab === 'structure' && node.type !== 'model') ? 'params' : tab;
 
   const [draft, setDraft] = useState('');
   /* 输出预览的大窗：内容与内嵌版同一个组件，只是舞台更大 */
@@ -168,6 +169,7 @@ export function NodeInspector({
 
   const tabs = [
     { label: t('wf.tabParams'), value: 'params' },
+    ...(node.type === 'model' ? [{ label: t('wf.tabStructure'), value: 'structure' }] : []),
     { label: t('wf.tabOutput'), value: 'output' },
     ...(aiEnabled ? [{ label: t('wf.tabAi'), value: 'ai' }] : []),
   ];
@@ -175,7 +177,10 @@ export function NodeInspector({
   const status = STATUS[node.status];
 
   return (
-    <div className="bg-background border-border flex h-full w-87 flex-none flex-col border-s">
+    <div className={cn(
+      'bg-background border-border flex h-full flex-none flex-col border-s',
+      active === 'structure' ? 'w-[560px] max-w-[65vw]' : 'w-87',
+    )}>
       {/* 头部：节点是谁 + 现在什么状态 */}
       <div className="border-border/60 border-b px-3 pt-3 pb-2.5">
         <div className="flex items-center gap-2">
@@ -278,6 +283,8 @@ export function NodeInspector({
           )}
         </div>
       )}
+
+      {active === 'structure' && <ModelStructurePanel node={node} />}
 
       {active === 'output' && (
         <div className="flex min-h-0 flex-1 flex-col px-3 pt-3 pb-4">

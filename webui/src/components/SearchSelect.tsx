@@ -39,6 +39,7 @@ export function SearchSelect({
   placeholder,
   allowCustom = true,
   display,
+  onEditingChange,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -53,6 +54,8 @@ export function SearchSelect({
    * 不传 = 显示 value 原文（既有行为不变）。
    */
   display?: string;
+  /** 聚焦/键入时为 true，选中候选或失焦为 false（面板据此暂停远端探测）。 */
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -76,9 +79,13 @@ export function SearchSelect({
         placeholder={placeholder}
         onFocus={() => {
           setOpen(true);
+          onEditingChange?.(true);
           document.addEventListener('mousedown', closeOnOutside);
         }}
-        onBlur={() => document.removeEventListener('mousedown', closeOnOutside)}
+        onBlur={() => {
+          onEditingChange?.(false);
+          document.removeEventListener('mousedown', closeOnOutside);
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Escape') setOpen(false);
           /* 输入法组词中的 Enter 是选字，不当选中（与同文件自定义分支同一判据） */
@@ -92,6 +99,7 @@ export function SearchSelect({
         onChange={(e) => {
           setEdited(true);
           onChange(e.target.value);
+          onEditingChange?.(true);
           setOpen(true);
         }}
         className="h-8 text-[13px]"
@@ -106,6 +114,7 @@ export function SearchSelect({
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
                 onChange(o.value);
+                onEditingChange?.(false);
                 setOpen(false);
               }}
             >
